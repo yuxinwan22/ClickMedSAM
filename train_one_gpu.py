@@ -135,11 +135,13 @@ class NpyDataset(Dataset):
             if sum_lcc > max_lcc:
                 max_lcc = sum_lcc
                 lcc_mask = largest_component_mask
-                best_click = (x_indices_clicks[i], y_indices_clicks[i])
+                best_click = np.array([x_indices_clicks[i], y_indices_clicks[i]])
             # only for debug
             if int(sum_cc) < int(sum_lcc):
                 print(img_name, 'sum_cc', sum_cc, 'sum_lcc', sum_lcc)
                 print("Warnings! cc3d may get some error! But still let codes run!")
+        click_coords = torch.tensor(best_click, dtype=torch.float32).unsqueeze(0)
+        click_labels = torch.tensor(label, dtype=torch.float32).unsqueeze(0)
         
         x_min, x_max = np.min(x_indices), np.max(x_indices)
         y_min, y_max = np.min(y_indices), np.max(y_indices)
@@ -158,7 +160,7 @@ class NpyDataset(Dataset):
             "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
             "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long(),
             "largest_cc_mask": torch.tensor(lcc_mask[None, None, ...]).long(),
-            "click": torch.tensor(best_click).long()
+            "click": (click_coords, click_labels)
         }
 
     def resize_longest_side(self, image):
@@ -202,12 +204,12 @@ class MedSAM_Lite(nn.Module):
         self.mask_decoder = mask_decoder
         self.prompt_encoder = prompt_encoder
         
-    def forward(self, image, boxes):
+    def forward(self, image, click):
         image_embedding = self.image_encoder(image) # (B, 256, 64, 64)
 
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
-            points=None,
-            boxes=boxes,
+            boxes=None,
+            points=click,
             masks=None,
         )
         low_res_masks, iou_predictions = self.mask_decoder(
@@ -474,8 +476,8 @@ def main():
             boxes = batch["bboxes"]
             click = batch["click"]
             optimizer.zero_grad()
-            image, gt2D, boxes = image.to(device), gt2D.to(device), boxes.to(device)
-            logits_pred, iou_pred = medsam_lite_model(image, boxes)
+            image, gt2D, click = image.to(device), gt2D.to(device), (click[0].to(device), click[1].to(device))
+            logits_pred, iou_pred = medsam_lite_model(image, click)
             l_seg = seg_loss(logits_pred, gt2D)
             l_ce = ce_loss(logits_pred, gt2D.float())
             #mask_loss = l_seg + l_ce
