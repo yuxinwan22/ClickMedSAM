@@ -106,6 +106,9 @@ class NpyDataset(Dataset):
         idx_random = np.random.choice(len(y_indices), num_clicks, replace=False)
         y_indices_clicks = y_indices[idx_random]
         x_indices_clicks = x_indices[idx_random]
+        max_lcc = 0
+        lcc_mask = None
+        sum_lcc_tmp = None
         for i in range(num_clicks):
             p_click = gt_padded[y_indices_clicks[i], x_indices_clicks[i]]
             p_threshold = 0.1
@@ -120,61 +123,23 @@ class NpyDataset(Dataset):
             largest_component_label = np.argmax(np.bincount(connected_components.flat)[1:]) + 1
             largest_component_mask = (connected_components==largest_component_label).astype(np.uint8) * 255
             sum_lcc = np.sum(largest_component_mask) / 255
-        
-        x_min, x_max = np.min(x_indices), np.max(x_indices)
-        y_min, y_max = np.min(y_indices), np.max(y_indices)
-        # add perturbation to bounding box coordinates
-        H, W = gt2D.shape
-        x_min = max(0, x_min - random.randint(0, self.bbox_shift))
-        x_max = min(W, x_max + random.randint(0, self.bbox_shift))
-        y_min = max(0, y_min - random.randint(0, self.bbox_shift))
-        y_max = min(H, y_max + random.randint(0, self.bbox_shift))
-        bboxes = np.array([x_min, y_min, x_max, y_max])
-        return {
-            "image": torch.tensor(img_padded).float(),
-            "gt2D": torch.tensor(gt2D[None, :,:]).long(),
-            "bboxes": torch.tensor(bboxes[None, None, ...]).float(), # (B, 1, 4)
-            "image_name": img_name,
-            "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
-            "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long()
-        }
+            # only for debug
+            if sum_lcc_tmp is None:
+                sum_lcc_tmp = sum_lcc
+            else:
+                if sum_lcc != sum_lcc_tmp:
+                    print("Multi-clicks in gt make sense!")
+                    print(img_name, 'sum_lcc', sum_lcc, 'sum_lcc_tmp', sum_lcc_tmp)
+                    sum_lcc_tmp = sum_lcc
 
-    def get_clicks_test(self, index):
-        img_name = basename(self.gt_path_files[index])
-        assert img_name == basename(self.gt_path_files[index]), 'img gt name error' + self.gt_path_files[index] + self.npy_files[index]
-        img_3c = np.load(join(self.img_path, img_name), 'r', allow_pickle=True) # (H, W, 3)
-        img_resize = self.resize_longest_side(img_3c)
-        # Resizing
-        img_resize = (img_resize - img_resize.min()) / np.clip(img_resize.max() - img_resize.min(), a_min=1e-8, a_max=None) # normalize to [0, 1], (H, W, 3
-        img_padded = self.pad_image(img_resize) # (256, 256, 3)
-        # convert the shape to (3, H, W)
-        img_padded = np.transpose(img_padded, (2, 0, 1)) # (3, 256, 256)
-        assert np.max(img_padded)<=1.0 and np.min(img_padded)>=0.0, 'image should be normalized to [0, 1]'
-        gt = np.load(self.gt_path_files[index], 'r', allow_pickle=True) # multiple labels [0, 1,4,5...], (256,256)
-        gt = cv2.resize(
-            gt,
-            (img_resize.shape[1], img_resize.shape[0]),
-            interpolation=cv2.INTER_NEAREST
-        ).astype(np.uint8)
-        gt = self.pad_image(gt) # (256, 256)
-        label_ids = np.unique(gt)[1:]
-        try:
-            gt2D = np.uint8(gt == random.choice(label_ids.tolist())) # only one label, (256, 256)
-        except:
-            print(img_name, 'label_ids.tolist()', label_ids.tolist())
-            gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
-        # add data augmentation: random fliplr and random flipud
-        if self.data_aug:
-            if random.random() > 0.5:
-                img_padded = np.ascontiguousarray(np.flip(img_padded, axis=-1))
-                gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-1))
-                # print('DA with flip left right')
-            if random.random() > 0.5:
-                img_padded = np.ascontiguousarray(np.flip(img_padded, axis=-2))
-                gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-2))
-                # print('DA with flip upside down')
-        gt2D = np.uint8(gt2D > 0)
-        y_indices, x_indices = np.where(gt2D > 0)
+            if sum_lcc > max_lcc:
+                max_lcc = sum_lcc
+                lcc_mask = largest_component_mask
+                best_click = (x_indices_clicks[i], y_indices_clicks[i])
+            # only for debug
+            if int(sum_cc) < int(sum_lcc):
+                print(img_name, 'sum_cc', sum_cc, 'sum_lcc', sum_lcc)
+                print("Warnings! cc3d may get some error! But still let codes run!")
         
         x_min, x_max = np.min(x_indices), np.max(x_indices)
         y_min, y_max = np.min(y_indices), np.max(y_indices)
@@ -191,7 +156,9 @@ class NpyDataset(Dataset):
             "bboxes": torch.tensor(bboxes[None, None, ...]).float(), # (B, 1, 4)
             "image_name": img_name,
             "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
-            "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long()
+            "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long(),
+            "largest_cc_mask": torch.tensor(lcc_mask[None, None, ...]).long(),
+            "click": torch.tensor(best_click).long()
         }
 
     def resize_longest_side(self, image):
@@ -505,6 +472,7 @@ def main():
             image = batch["image"]
             gt2D = batch["gt2D"]
             boxes = batch["bboxes"]
+            click = batch["click"]
             optimizer.zero_grad()
             image, gt2D, boxes = image.to(device), gt2D.to(device), boxes.to(device)
             logits_pred, iou_pred = medsam_lite_model(image, boxes)
