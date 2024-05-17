@@ -239,7 +239,40 @@ class MedSAM_Lite(nn.Module):
 
         return masks
 
+def cal_loss(pred, gt, seg, ce, iou):
+    logits_pred, iou_pred = pred
+    seg_loss, seg_loss_weight = seg
+    ce_loss, ce_loss_weight = ce
+    iou_loss, iou_loss_weight = iou
+    
+    l_seg = seg_loss(logits_pred, gt)
+    l_ce = ce_loss(logits_pred, gt.float())
+    #mask_loss = l_seg + l_ce
+    mask_loss = seg_loss_weight * l_seg + ce_loss_weight * l_ce
+    iou_gt = cal_iou(torch.sigmoid(logits_pred) > 0.5, gt.bool())
+    l_iou = iou_loss(iou_pred, iou_gt)
+    #loss = mask_loss + l_iou
+    try:
+        loss = mask_loss + iou_loss_weight * l_iou
+    except:
+        l_iou = l_iou.unsqueeze(-1).unsqueeze(-1)
+        loss = mask_loss + iou_loss_weight * l_iou
+    return loss
 
+def cal_loss_click(pred, gt, seg, ce, iou):
+    logits_pred, iou_pred = pred
+    seg_loss, seg_loss_weight = seg
+    ce_loss, ce_loss_weight = ce
+    iou_loss, iou_loss_weight = iou
+    
+    l_seg = seg_loss(logits_pred, gt)
+    l_ce = ce_loss(logits_pred, gt.float())
+    mask_loss = seg_loss_weight * l_seg + ce_loss_weight * l_ce
+    iou_gt = cal_iou(torch.sigmoid(logits_pred) > 0.5, gt.bool())
+    l_iou = iou_loss(iou_pred, iou_gt)
+    l_iou = l_iou.unsqueeze(-1).unsqueeze(-1)
+    loss = mask_loss + iou_loss_weight * l_iou
+    return loss
 
 def main():
     parser = argparse.ArgumentParser()
@@ -449,6 +482,9 @@ def main():
     seg_loss = monai.losses.DiceLoss(sigmoid=True, squared_pred=True, reduction='mean')
     ce_loss = nn.BCEWithLogitsLoss(reduction='mean')
     iou_loss = nn.MSELoss(reduction='mean')
+    seg_loss_batch = monai.losses.DiceLoss(sigmoid=True, squared_pred=True, reduction='none')
+    ce_loss_batch = nn.BCEWithLogitsLoss(reduction='none')
+    iou_loss_batch = nn.MSELoss(reduction='none')
     # %%
     train_dataset = NpyDataset(data_root=data_root, data_aug=False)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
@@ -486,6 +522,7 @@ def main():
             l_iou = iou_loss(iou_pred, iou_gt)
             #loss = mask_loss + l_iou
             loss = mask_loss + iou_loss_weight * l_iou
+            loss1 = cal_loss(pred=(logits_pred, iou_pred),gt=gt2D, seg=(seg_loss_batch, seg_loss_weight), ce=(ce_loss_batch, ce_loss_weight), iou=(iou_loss_batch, iou_loss_weight))
             epoch_loss[step] = loss.item()
             loss.backward()
             optimizer.step()
