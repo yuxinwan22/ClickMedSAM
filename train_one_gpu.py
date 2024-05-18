@@ -109,7 +109,9 @@ class NpyDataset(Dataset):
         max_lcc = 0
         lcc_mask = None
         sum_lcc_tmp = None
+        clicks = []
         for i in range(num_clicks):
+            clicks.append(np.array([y_indices_clicks[i], x_indices_clicks[i]]))
             p_click = gt_padded[y_indices_clicks[i], x_indices_clicks[i]]
             p_threshold = 0.1
             p_up = p_click * (1 + p_threshold)
@@ -135,11 +137,12 @@ class NpyDataset(Dataset):
             if sum_lcc > max_lcc:
                 max_lcc = sum_lcc
                 lcc_mask = largest_component_mask
-                best_click = np.array([x_indices_clicks[i], y_indices_clicks[i]])
+                best_click = np.array([y_indices_clicks[i], x_indices_clicks[i]])
             # only for debug
             if int(sum_cc) < int(sum_lcc):
                 print(img_name, 'sum_cc', sum_cc, 'sum_lcc', sum_lcc)
                 print("Warnings! cc3d may get some error! But still let codes run!")
+        clicks = np.array(clicks)
         click_coords = torch.tensor(best_click, dtype=torch.float32).unsqueeze(0)
         click_labels = torch.tensor(label, dtype=torch.float32).unsqueeze(0)
         
