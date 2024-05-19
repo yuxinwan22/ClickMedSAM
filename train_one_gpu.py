@@ -65,7 +65,7 @@ class NpyDataset(Dataset):
         return len(self.gt_path_files)
 
     def __getitem__(self, index):
-        num_clicks = 5
+        num_clicks = 20
         img_name = basename(self.gt_path_files[index])
         assert img_name == basename(self.gt_path_files[index]), 'img gt name error' + self.gt_path_files[index] + self.npy_files[index]
         img_3c = np.load(join(self.img_path, img_name), 'r', allow_pickle=True) # (H, W, 3)
@@ -103,49 +103,52 @@ class NpyDataset(Dataset):
                 # print('DA with flip upside down')
         gt2D = np.uint8(gt2D > 0)
         y_indices, x_indices = np.where(gt2D > 0)
-        idx_random = np.random.choice(len(y_indices), num_clicks, replace=False)
-        y_indices_clicks = y_indices[idx_random]
-        x_indices_clicks = x_indices[idx_random]
-        max_lcc = 0
-        lcc_mask = None
-        sum_lcc_tmp = None
-        clicks = []
-        for i in range(num_clicks):
-            clicks.append(np.array([y_indices_clicks[i], x_indices_clicks[i]]))
-            p_click = gt_padded[y_indices_clicks[i], x_indices_clicks[i]]
-            p_threshold = 0.1
-            p_up = p_click * (1 + p_threshold)
-            p_down = p_click * (1 - p_threshold)
-            gt_click = gt_padded.copy()
-            gt_click[gt_click > p_up] = 0
-            gt_click[gt_click < p_down] = 0
-            gt_click[gt_click > 0] = label
-            connected_components = cc3d.connected_components(gt_click)
-            sum_cc = np.sum(connected_components)
-            largest_component_label = np.argmax(np.bincount(connected_components.flat)[1:]) + 1
-            largest_component_mask = (connected_components==largest_component_label).astype(np.uint8) * 255
-            sum_lcc = np.sum(largest_component_mask) / 255
-            # only for debug
-            if sum_lcc_tmp is None:
-                sum_lcc_tmp = sum_lcc
-            else:
-                if sum_lcc != sum_lcc_tmp:
-                    print("Multi-clicks in gt make sense!")
-                    print(img_name, 'sum_lcc', sum_lcc, 'sum_lcc_tmp', sum_lcc_tmp)
-                    sum_lcc_tmp = sum_lcc
+        clicks_coords = torch.stack([torch.tensor(y_indices, dtype=torch.float32), torch.tensor(x_indices, dtype=torch.float32)], dim=1)
+        clicks_coords = clicks_coords[torch.randperm(clicks_coords.shape[0])[:num_clicks]]
+        # idx_random = np.random.choice(len(y_indices), num_clicks, replace=False)
+        # y_indices_clicks = y_indices[idx_random]
+        # x_indices_clicks = x_indices[idx_random]
+        # max_lcc = 0
+        # lcc_mask = None
+        # sum_lcc_tmp = None
+        
+        # # clicks = []
+        # for i in range(num_clicks):
+        #     # clicks.append(np.array([y_indices_clicks[i], x_indices_clicks[i]]))
+        #     p_click = gt_padded[y_indices_clicks[i], x_indices_clicks[i]]
+        #     p_threshold = 0.1
+        #     p_up = p_click * (1 + p_threshold)
+        #     p_down = p_click * (1 - p_threshold)
+        #     gt_click = gt_padded.copy()
+        #     gt_click[gt_click > p_up] = 0
+        #     gt_click[gt_click < p_down] = 0
+        #     gt_click[gt_click > 0] = label
+        #     connected_components = cc3d.connected_components(gt_click)
+        #     sum_cc = np.sum(connected_components)
+        #     largest_component_label = np.argmax(np.bincount(connected_components.flat)[1:]) + 1
+        #     largest_component_mask = (connected_components==largest_component_label).astype(np.uint8) * 255
+        #     sum_lcc = np.sum(largest_component_mask) / 255
+        #     # only for debug
+        #     if sum_lcc_tmp is None:
+        #         sum_lcc_tmp = sum_lcc
+        #     else:
+        #         if sum_lcc != sum_lcc_tmp:
+        #             print("Multi-clicks in gt make sense!")
+        #             print(img_name, 'sum_lcc', sum_lcc, 'sum_lcc_tmp', sum_lcc_tmp)
+        #             sum_lcc_tmp = sum_lcc
 
-            if sum_lcc > max_lcc:
-                max_lcc = sum_lcc
-                lcc_mask = largest_component_mask
-                best_click = np.array([y_indices_clicks[i], x_indices_clicks[i]])
-            # only for debug
-            if int(sum_cc) < int(sum_lcc):
-                print(img_name, 'sum_cc', sum_cc, 'sum_lcc', sum_lcc)
-                print("Warnings! cc3d may get some error! But still let codes run!")
-        clicks = np.array(clicks)
-        clicks = torch.tensor(clicks, dtype=torch.float32)
-        click_coords = torch.tensor(best_click, dtype=torch.float32).unsqueeze(0)
-        click_labels = torch.tensor(label, dtype=torch.float32).repeat(clicks.shape[0])
+        #     if sum_lcc > max_lcc:
+        #         max_lcc = sum_lcc
+        #         lcc_mask = largest_component_mask
+        #         best_click = np.array([y_indices_clicks[i], x_indices_clicks[i]])
+        #     # only for debug
+        #     if int(sum_cc) < int(sum_lcc):
+        #         print(img_name, 'sum_cc', sum_cc, 'sum_lcc', sum_lcc)
+        #         print("Warnings! cc3d may get some error! But still let codes run!")
+        # # clicks = np.array(clicks)
+        # # clicks = torch.tensor(clicks, dtype=torch.float32)
+        # # click_coords = torch.tensor(best_click, dtype=torch.float32).unsqueeze(0)
+        click_labels = torch.tensor(label, dtype=torch.float32).repeat(clicks_coords.shape[0])
         
         x_min, x_max = np.min(x_indices), np.max(x_indices)
         y_min, y_max = np.min(y_indices), np.max(y_indices)
@@ -163,8 +166,8 @@ class NpyDataset(Dataset):
             "image_name": img_name,
             "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
             "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long(),
-            "largest_cc_mask": torch.tensor(lcc_mask[None, None, ...]).long(),
-            "click": (clicks, click_labels)
+            # "largest_cc_mask": torch.tensor(lcc_mask[None, None, ...]).long(),
+            "click": (clicks_coords, click_labels)
         }
 
     def resize_longest_side(self, image):
