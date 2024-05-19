@@ -143,8 +143,9 @@ class NpyDataset(Dataset):
                 print(img_name, 'sum_cc', sum_cc, 'sum_lcc', sum_lcc)
                 print("Warnings! cc3d may get some error! But still let codes run!")
         clicks = np.array(clicks)
+        clicks = torch.tensor(clicks, dtype=torch.float32)
         click_coords = torch.tensor(best_click, dtype=torch.float32).unsqueeze(0)
-        click_labels = torch.tensor(label, dtype=torch.float32).unsqueeze(0)
+        click_labels = torch.tensor(label, dtype=torch.float32).repeat(clicks.shape[0])
         
         x_min, x_max = np.min(x_indices), np.max(x_indices)
         y_min, y_max = np.min(y_indices), np.max(y_indices)
@@ -163,7 +164,7 @@ class NpyDataset(Dataset):
             "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
             "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long(),
             "largest_cc_mask": torch.tensor(lcc_mask[None, None, ...]).long(),
-            "click": (click_coords, click_labels)
+            "click": (clicks, click_labels)
         }
 
     def resize_longest_side(self, image):
