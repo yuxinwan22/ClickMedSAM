@@ -65,7 +65,7 @@ class NpyDataset(Dataset):
         return len(self.gt_path_files)
 
     def __getitem__(self, index):
-        num_clicks = 20
+        num_clicks = 10
         img_name = basename(self.gt_path_files[index])
         assert img_name == basename(self.gt_path_files[index]), 'img gt name error' + self.gt_path_files[index] + self.npy_files[index]
         img_3c = np.load(join(self.img_path, img_name), 'r', allow_pickle=True) # (H, W, 3)
@@ -105,6 +105,10 @@ class NpyDataset(Dataset):
         y_indices, x_indices = np.where(gt2D > 0)
         clicks_coords = torch.stack([torch.tensor(y_indices, dtype=torch.int64), torch.tensor(x_indices, dtype=torch.int64)], dim=1)
         clicks_coords = clicks_coords[torch.randperm(clicks_coords.shape[0])[:num_clicks]]
+        
+        # num_clicks = min(num_clicks, clicks_coords.shape[0])
+        # clicks_coords = clicks_coords[torch.randperm(clicks_coords.shape[0])[:num_clicks]]
+        
         # idx_random = np.random.choice(len(y_indices), num_clicks, replace=False)
         # y_indices_clicks = y_indices[idx_random]
         # x_indices_clicks = x_indices[idx_random]
@@ -281,31 +285,28 @@ def cal_loss_click(pred, gt, seg, ce, iou):
     loss = mask_loss + iou_loss_weight * l_iou
     return loss
 
-def reselect_click(bs_size, clicks, logits_pred):
+def reselect_click(bs_size, clicks, logits_pred, click):
     num_clicks = clicks[0].size(1)
     clicks_value = logits_pred[torch.arange(bs_size).view(-1,1), 0, clicks[0][..., 0], clicks[0][..., 1]]
     presence = clicks_value > 0.5
 
-    # 获取每个批次中 presence 为 False 的索引
     false_indices = (presence == False).nonzero(as_tuple=True)
 
-    # 初始化随机索引
     random_indices = torch.randint(0, num_clicks, (bs_size,))
 
-    # 为每个批次选择一个 False 的索引或随机索引
     selected_indices = []
     for i in range(bs_size):
         false_indices_batch = false_indices[1][false_indices[0] == i]
         if len(false_indices_batch) > 0:
             random_idx = false_indices_batch[torch.randint(len(false_indices_batch), (1,))]
         else:
-            random_idx = random_indices[i]
+            random_idx = random_indices[i].unsqueeze(0)
         selected_indices.append(clicks[0][i, random_idx].unsqueeze(0))
 
-    selected_indices = torch.cat(selected_indices,dim=0)
-
-    print("Selected indices shape:", selected_indices.shape)
-    print("Selected indices:", selected_indices)
+    selected_indices = torch.cat(selected_indices, dim=0)
+    click_coords = torch.cat([selected_indices, click[0]], dim=1)
+    label = clicks[1][:, :click_coords.shape[1]]
+    return (click_coords, label)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -546,14 +547,16 @@ def main():
             clicks = batch["clicks"]
             clicks = (clicks[0].to(device), clicks[1].to(device))
             bs_size = clicks[0].size(0)
-            print("clicks_batch0", clicks[0][0])
             random_index = torch.randint(0, clicks[0].size(1), (1,))
             click = (clicks[0][:, random_index, :], clicks[1][:, random_index])
             optimizer.zero_grad()
             image, gt2D, click = image.to(device), gt2D.to(device), (click[0].to(device), click[1].to(device))
-            logits_pred, iou_pred = medsam_lite_model(image, click)
-            idx_error = torch.nonzero(logits_pred <= 0.5)
-            reselect_click(bs_size, clicks, logits_pred)
+            for i in range(3):
+                logits_pred, iou_pred = medsam_lite_model(image, click)
+                if i != 2:
+                    click = reselect_click(bs_size, clicks, logits_pred, click)
+                else:
+                    del click
             l_seg = seg_loss(logits_pred, gt2D)
             l_ce = ce_loss(logits_pred, gt2D.float())
             #mask_loss = l_seg + l_ce
