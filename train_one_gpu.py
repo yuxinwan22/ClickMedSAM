@@ -215,13 +215,13 @@ class MedSAM_Lite(nn.Module):
         self.mask_decoder = mask_decoder
         self.prompt_encoder = prompt_encoder
         
-    def forward(self, image, click):
+    def forward(self, image, click, mask=None):
         image_embedding = self.image_encoder(image) # (B, 256, 64, 64)
 
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
             boxes=None,
             points=click,
-            masks=None,
+            masks=mask,
         )
         low_res_masks, iou_predictions = self.mask_decoder(
             image_embeddings=image_embedding, # (B, 256, 64, 64)
@@ -331,7 +331,7 @@ def main():
         help="Number of epochs to train."
     )
     parser.add_argument(
-        "-batch_size", type=int, default=4,
+        "-batch_size", type=int, default=1,
         help="Batch size."
     )
     parser.add_argument(
@@ -551,12 +551,16 @@ def main():
             click = (clicks[0][:, random_index, :], clicks[1][:, random_index])
             optimizer.zero_grad()
             image, gt2D, click = image.to(device), gt2D.to(device), (click[0].to(device), click[1].to(device))
-            for i in range(3):
-                logits_pred, iou_pred = medsam_lite_model(image, click)
-                if i != 2:
-                    click = reselect_click(bs_size, clicks, logits_pred, click)
-                else:
-                    del click
+            logits_pred = None
+            for _ in range(3):
+                # if i == 0:
+                #     logits_pred, iou_pred = medsam_lite_model(image, click)
+                # else:
+                logits_pred, iou_pred = medsam_lite_model(image, click, logits_pred)
+                # if i != 2:
+                #     click = reselect_click(bs_size, clicks, logits_pred, click)
+                # else:
+                #     del click
             l_seg = seg_loss(logits_pred, gt2D)
             l_ce = ce_loss(logits_pred, gt2D.float())
             #mask_loss = l_seg + l_ce
