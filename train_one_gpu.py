@@ -23,6 +23,7 @@ import torch.nn.functional as F
 from matplotlib import pyplot as plt
 import argparse
 import cc3d
+import wandb
 def show_mask(mask, ax, random_color=False):
     if random_color:
         color = np.concatenate([np.random.random(3), np.array([0.45])], axis=0)
@@ -327,7 +328,7 @@ def main():
         help="Path to the working directory where checkpoints and logs will be saved."
     )
     parser.add_argument(
-        "-num_epochs", type=int, default=10,
+        "-num_epochs", type=int, default=50,
         help="Number of epochs to train."
     )
     parser.add_argument(
@@ -370,6 +371,32 @@ def main():
         "--sanity_check", action="store_true",
         help="Whether to do sanity check for dataloading."
     )
+    
+    
+    parser.add_argument(
+        "-wandb_enable", type=bool, default=True,
+        help=""
+    )
+    
+    parser.add_argument(
+        "-wandb_entity", type=str, default="CVHCI_p24gF_ClickMedSAM",
+        help="the place to save your runs. can be your wandb username or team name"
+    )
+    
+    parser.add_argument(
+        "-wandb_project", type=str, default="wan_test",
+        help="Name of WandB project"
+    )
+    
+    parser.add_argument(
+        "-wandb_name", type=str, default="debug",
+        help="wandb run name"
+    )
+    
+    parser.add_argument(
+        "-wandb_api_key", type=str, default="3fbca40760ef6b876bd8b91911d1008dad6a7b09",
+        help="wandb api key"
+    )
 
     args = parser.parse_args()
     # %%
@@ -388,8 +415,31 @@ def main():
     ce_loss_weight = args.ce_loss_weight
     do_sancheck = args.sanity_check
     checkpoint = args.resume
+    
+    wandb_enable = args.wandb_enable
+    wandb_project = args.wandb_project
+    wandb_entity = args.wandb_entity
+    wandb_name = args.wandb_name
+    wandb_api_key = args.wandb_api_key
+    
+    config = {
+        "medsam_lite_checkpoint": medsam_lite_checkpoint,
+        "num_epochs": num_epochs,
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "device": device,
+        "bbox_shift": bbox_shift,
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "iou_loss_weight": iou_loss_weight,
+        "seg_loss_weight": seg_loss_weight,
+        "ce_loss_weight": ce_loss_weight,
+    }
 
     makedirs(work_dir, exist_ok=True)
+    if wandb_enable:
+        wandb.login(key=wandb_api_key)
+        wandb.init(project=wandb_project, entity=wandb_entity, config=config, name=wandb_name)
 
     # %%
     torch.cuda.empty_cache()
@@ -578,6 +628,7 @@ def main():
 
         epoch_end_time = time()
         epoch_loss_reduced = sum(epoch_loss) / len(epoch_loss)
+        wandb.log({"train_loss": epoch_loss_reduced})
         train_losses.append(epoch_loss_reduced)
         lr_scheduler.step(epoch_loss_reduced)
         model_weights = medsam_lite_model.state_dict()
@@ -603,6 +654,7 @@ def main():
         plt.ylabel("Loss")
         plt.savefig(join(work_dir, "train_loss.png"))
         plt.close()
+    wandb.finish(quiet=True)
 if __name__ == '__main__':
     # from multiprocessing import freeze_support
     # freeze_support()
