@@ -26,6 +26,8 @@ import torch.nn.functional as F
 from matplotlib import pyplot as plt
 import argparse
 
+import wandb
+import shutil
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -40,15 +42,27 @@ def get_args():
                         help='use data augmentation during training')
     # train
     parser.add_argument('-num_epochs', type=int, default=1000)
-    parser.add_argument('-batch_size', type=int, default=4)
+    parser.add_argument('-batch_size', type=int, default=1)
     parser.add_argument('-num_workers', type=int, default=8)
+    
     # Optimizer parameters
     parser.add_argument('-weight_decay', type=float, default=0.01,
                         help='weight decay (default: 0.01)')
     parser.add_argument('-lr', type=float, default=0.0001, metavar='LR',
                         help='learning rate (absolute lr)')
+    
+    # loss weight
+    parser.add_argument("-iou_loss_weight", type=float, default=1.0,
+                        help="Weight of IoU loss.")
+    parser.add_argument("-seg_loss_weight", type=float, default=1.0,
+                        help="Weight of segmentation loss.")
+    parser.add_argument("-ce_loss_weight", type=float, default=1.0,
+                        help="Weight of cross entropy loss.")
+    parser.add_argument("--sanity_check", action="store_true",
+                        help="Whether to do sanity check for dataloading.")
+    
     ## Distributed training args
-    parser.add_argument('-world_size', type=int, default=1,
+    parser.add_argument('-world_size', type=int, default=4,
                         help='world size, Total number of GPUs will be used')
     parser.add_argument('-node_rank', type=int, default=0,
                         help='Node rank, if training on a single machine, set to 0')
@@ -57,6 +71,18 @@ def get_args():
     parser.add_argument('-resume', type = str, default = 'lite_medsam.pth', required=False,
                         help="Resuming training from a work_dir")
     parser.add_argument('-init_method', type = str, default = "env://")
+    
+    ## wandb
+    parser.add_argument("-wandb_enable", type=bool, default=True,
+                        help="")
+    parser.add_argument("-wandb_entity", type=str, default="CVHCI_p24gF_ClickMedSAM",
+                        help="the place to save your runs. can be your wandb username or team name")
+    parser.add_argument("-wandb_project", type=str, default="wan_test",
+                        help="Name of WandB project")
+    parser.add_argument("-wandb_name", type=str, default="debug_multi_gpu",
+                        help="wandb run name")
+    parser.add_argument("-wandb_api_key", type=str, default="3fbca40760ef6b876bd8b91911d1008dad6a7b09",
+                        help="wandb api key")
     args = parser.parse_args()
 
     return args
@@ -116,12 +142,15 @@ def revert_sync_batchnorm(module: torch.nn.Module) -> torch.nn.Module:
 
 
 class NpyDataset(Dataset): 
-    def __init__(self, data_root, image_size=256, bbox_shift=10, data_aug=True):
+    def __init__(self, data_root, image_size=256, bbox_shift=5, data_aug=True):
         self.data_root = data_root
         self.gt_path = join(data_root, 'gts')
         self.img_path = join(data_root, 'imgs')
         self.gt_path_files = sorted(glob(join(self.gt_path, '*.npy'), recursive=True))
-        self.gt_path_files = [file for file in self.gt_path_files if isfile(join(self.img_path, basename(file)))]
+        self.gt_path_files = [
+            file for file in self.gt_path_files
+            if isfile(join(self.img_path, basename(file)))
+        ]
         self.image_size = image_size
         self.target_length = image_size
         self.bbox_shift = bbox_shift
@@ -131,27 +160,29 @@ class NpyDataset(Dataset):
         return len(self.gt_path_files)
 
     def __getitem__(self, index):
+        num_clicks = 10
         img_name = basename(self.gt_path_files[index])
         assert img_name == basename(self.gt_path_files[index]), 'img gt name error' + self.gt_path_files[index] + self.npy_files[index]
         img_3c = np.load(join(self.img_path, img_name), 'r', allow_pickle=True) # (H, W, 3)
-        # Resizing and normalization
         img_resize = self.resize_longest_side(img_3c)
+        # Resizing
         img_resize = (img_resize - img_resize.min()) / np.clip(img_resize.max() - img_resize.min(), a_min=1e-8, a_max=None) # normalize to [0, 1], (H, W, 3
         img_padded = self.pad_image(img_resize) # (256, 256, 3)
         # convert the shape to (3, H, W)
         img_padded = np.transpose(img_padded, (2, 0, 1)) # (3, 256, 256)
         assert np.max(img_padded)<=1.0 and np.min(img_padded)>=0.0, 'image should be normalized to [0, 1]'
         gt = np.load(self.gt_path_files[index], 'r', allow_pickle=True) # multiple labels [0, 1,4,5...], (256,256)
-        assert gt.max() >= 1, 'gt should have at least one label'
         gt = cv2.resize(
             gt,
             (img_resize.shape[1], img_resize.shape[0]),
             interpolation=cv2.INTER_NEAREST
         ).astype(np.uint8)
-        gt = self.pad_image(gt) # (256, 256)
+        gt_padded = self.pad_image(gt) # (256, 256)
+        gt = gt_padded.copy()
         label_ids = np.unique(gt)[1:]
         try:
-            gt2D = np.uint8(gt == random.choice(label_ids.tolist())) # only one label, (256, 256)
+            label = random.choice(label_ids)
+            gt2D = np.uint8(gt == label) # only one label, (256, 256)
         except:
             print(img_name, 'label_ids.tolist()', label_ids.tolist())
             gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
@@ -167,14 +198,18 @@ class NpyDataset(Dataset):
                 # print('DA with flip upside down')
         gt2D = np.uint8(gt2D > 0)
         y_indices, x_indices = np.where(gt2D > 0)
+        clicks_coords = torch.stack([torch.tensor(y_indices, dtype=torch.int64), torch.tensor(x_indices, dtype=torch.int64)], dim=1)
+        clicks_coords = clicks_coords[torch.randperm(clicks_coords.shape[0])[:num_clicks]]
+        click_labels = torch.tensor(label, dtype=torch.float32).repeat(clicks_coords.shape[0])
+        
         x_min, x_max = np.min(x_indices), np.max(x_indices)
         y_min, y_max = np.min(y_indices), np.max(y_indices)
         # add perturbation to bounding box coordinates
         H, W = gt2D.shape
         x_min = max(0, x_min - random.randint(0, self.bbox_shift))
-        x_max = min(W-1, x_max + random.randint(0, self.bbox_shift))
+        x_max = min(W, x_max + random.randint(0, self.bbox_shift))
         y_min = max(0, y_min - random.randint(0, self.bbox_shift))
-        y_max = min(H-1, y_max + random.randint(0, self.bbox_shift))
+        y_max = min(H, y_max + random.randint(0, self.bbox_shift))
         bboxes = np.array([x_min, y_min, x_max, y_max])
         return {
             "image": torch.tensor(img_padded).float(),
@@ -182,7 +217,8 @@ class NpyDataset(Dataset):
             "bboxes": torch.tensor(bboxes[None, None, ...]).float(), # (B, 1, 4)
             "image_name": img_name,
             "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
-            "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long()
+            "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long(),
+            "clicks": (clicks_coords, click_labels)
         }
 
     def resize_longest_side(self, image):
@@ -231,7 +267,7 @@ def sanity_check_dataset(args):
     print('tr_npy_path', args.tr_npy_path)
     tr_dataset = NpyDataset(args.tr_npy_path, data_aug=args.data_aug)
     print('len(tr_dataset)', len(tr_dataset))
-    tr_dataloader = DataLoader(tr_dataset, batch_size=8, shuffle=True, collate_fn=collate_fn)
+    tr_dataloader = DataLoader(tr_dataset, batch_size=8, shuffle=True)
     makedirs(args.work_dir, exist_ok=True)
     for step, batch in enumerate(tr_dataloader):
         # print(image.shape, gt.shape, bboxes.shape)
@@ -273,21 +309,21 @@ class MedSAM_Lite(nn.Module):
                 image_encoder, 
                 mask_decoder,
                 prompt_encoder
-        ):
+                ):
         super().__init__()
         self.image_encoder = image_encoder
         self.mask_decoder = mask_decoder
         self.prompt_encoder = prompt_encoder
-
-    def forward(self, image, boxes):
+        
+    def forward(self, image, click, mask=None):
         image_embedding = self.image_encoder(image) # (B, 256, 64, 64)
 
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
-            points=None,
-            boxes=boxes,
-            masks=None,
+            boxes=None,
+            points=click,
+            masks=mask,
         )
-        low_res_logits, iou_predictions = self.mask_decoder(
+        low_res_masks, iou_predictions = self.mask_decoder(
             image_embeddings=image_embedding, # (B, 256, 64, 64)
             image_pe=self.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
             sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
@@ -295,7 +331,7 @@ class MedSAM_Lite(nn.Module):
             multimask_output=False,
           ) # (B, 1, 256, 256)
 
-        return low_res_logits, iou_predictions
+        return low_res_masks, iou_predictions
 
     @torch.no_grad()
     def postprocess_masks(self, masks, new_size, original_size):
@@ -313,6 +349,64 @@ class MedSAM_Lite(nn.Module):
         )
 
         return masks
+
+def cal_loss(pred, gt, seg, ce, iou):
+    logits_pred, iou_pred = pred
+    seg_loss, seg_loss_weight = seg
+    ce_loss, ce_loss_weight = ce
+    iou_loss, iou_loss_weight = iou
+    
+    l_seg = seg_loss(logits_pred, gt)
+    l_ce = ce_loss(logits_pred, gt.float())
+    #mask_loss = l_seg + l_ce
+    mask_loss = seg_loss_weight * l_seg + ce_loss_weight * l_ce
+    iou_gt = cal_iou(torch.sigmoid(logits_pred) > 0.5, gt.bool())
+    l_iou = iou_loss(iou_pred, iou_gt)
+    #loss = mask_loss + l_iou
+    try:
+        loss = mask_loss + iou_loss_weight * l_iou
+    except:
+        l_iou = l_iou.unsqueeze(-1).unsqueeze(-1)
+        loss = mask_loss + iou_loss_weight * l_iou
+    return loss
+
+def cal_loss_click(pred, gt, seg, ce, iou):
+    logits_pred, iou_pred = pred
+    seg_loss, seg_loss_weight = seg
+    ce_loss, ce_loss_weight = ce
+    iou_loss, iou_loss_weight = iou
+    
+    l_seg = seg_loss(logits_pred, gt)
+    l_ce = ce_loss(logits_pred, gt.float())
+    mask_loss = seg_loss_weight * l_seg + ce_loss_weight * l_ce
+    iou_gt = cal_iou(torch.sigmoid(logits_pred) > 0.5, gt.bool())
+    l_iou = iou_loss(iou_pred, iou_gt)
+    l_iou = l_iou.unsqueeze(-1).unsqueeze(-1)
+    loss = mask_loss + iou_loss_weight * l_iou
+    return loss
+
+def reselect_click(bs_size, clicks, logits_pred, click):
+    num_clicks = clicks[0].size(1)
+    clicks_value = logits_pred[torch.arange(bs_size).view(-1,1), 0, clicks[0][..., 0], clicks[0][..., 1]]
+    presence = clicks_value > 0.5
+
+    false_indices = (presence == False).nonzero(as_tuple=True)
+
+    random_indices = torch.randint(0, num_clicks, (bs_size,))
+
+    selected_indices = []
+    for i in range(bs_size):
+        false_indices_batch = false_indices[1][false_indices[0] == i]
+        if len(false_indices_batch) > 0:
+            random_idx = false_indices_batch[torch.randint(len(false_indices_batch), (1,))]
+        else:
+            random_idx = random_indices[i].unsqueeze(0)
+        selected_indices.append(clicks[0][i, random_idx].unsqueeze(0))
+
+    selected_indices = torch.cat(selected_indices, dim=0)
+    click_coords = torch.cat([selected_indices, click[0]], dim=1)
+    label = clicks[1][:, :click_coords.shape[1]]
+    return (click_coords, label)
 
 def main(args):
     torch.cuda.empty_cache()
@@ -350,6 +444,20 @@ def main_worker(gpu, ngpus_per_node, args):
     num_epochs = args.num_epochs
     batch_size = args.batch_size
     num_workers = args.num_workers
+    
+    wandb_enable = args.wandb_enable
+    wandb_project = args.wandb_project
+    wandb_entity = args.wandb_entity
+    wandb_name = args.wandb_name
+    wandb_api_key = args.wandb_api_key
+    
+    if wandb_enable and is_main_host:
+        wandb.login(key=wandb_api_key)
+        del args.wandb_enable, args.wandb_api_key, args.wandb_project, args.wandb_entity, args.wandb_name
+        wandb.init(project=wandb_project, entity=wandb_entity, config=args, name=wandb_name)
+    
+    
+    
     medsam_lite_image_encoder = TinyViT(
         img_size=256,
         in_chans=3,
@@ -450,8 +558,7 @@ def main_worker(gpu, ngpus_per_node, args):
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
-        sampler=train_sampler,
-        collate_fn=collate_fn
+        sampler=train_sampler
     )
     # %%
 
@@ -486,16 +593,31 @@ def main_worker(gpu, ngpus_per_node, args):
             image = batch["image"]
             gt2D = batch["gt2D"]
             boxes = batch["bboxes"]
+            clicks = batch["clicks"]
+            clicks = (clicks[0].to(device), clicks[1].to(device))
+            random_index = torch.randint(0, clicks[0].size(1), (1,))
+            click = (clicks[0][:, random_index, :], clicks[1][:, random_index])
             optimizer.zero_grad()
-            image, gt2D, boxes = image.to(device), gt2D.to(device), boxes.to(device)
-            logits_pred, iou_pred = medsam_lite_model(image, boxes)
-            l_seg = seg_loss(logits_pred, gt2D)
-            l_ce = ce_loss(logits_pred, gt2D.float())
-            mask_loss = l_seg + l_ce
+            image, gt2D, click = image.to(device), gt2D.to(device), (click[0].to(device), click[1].to(device))
+            
+            # logits_pred = None
+            # for i in range(3):
+            #     logits_pred, iou_pred = medsam_lite_model(image, click)
+            #     if i != 2:
+            #         click = reselect_click(batch_size, clicks, logits_pred, click)
+            #     else:
+            #         del click
+                    
+            # medsam_lite_model.eval()
             with torch.no_grad():
-                iou_gt = cal_iou(torch.sigmoid(logits_pred) > 0.5, gt2D.bool())
-            l_iou = iou_loss(iou_pred, iou_gt)
-            loss = mask_loss + l_iou
+                logits_pred0, _ = medsam_lite_model(image, click)
+                logits_pred1, _ = medsam_lite_model(image, click, logits_pred0)
+                del logits_pred0
+            medsam_lite_model.train()
+            logits_pred, iou_pred = medsam_lite_model(image, click, logits_pred1)
+            del logits_pred1
+
+            loss = cal_loss(pred=(logits_pred, iou_pred),gt=gt2D, seg=(seg_loss, args.seg_loss_weight), ce=(ce_loss, args.ce_loss_weight), iou=(iou_loss, args.iou_loss_weight))
             epoch_loss[step] = loss.item()
             loss.backward()
             optimizer.step()
@@ -510,6 +632,8 @@ def main_worker(gpu, ngpus_per_node, args):
         epoch_loss_reduced = np.vstack(epoch_loss_world).mean()
         train_losses.append(epoch_loss_reduced)
         lr_scheduler.step(epoch_loss_reduced)
+        if is_main_host and wandb_enable:
+            wandb.log({"train_loss": epoch_loss_reduced})
 
         if is_main_host:
             module_revert_sync_BN = revert_sync_batchnorm(deepcopy(medsam_lite_model.module))
@@ -544,10 +668,11 @@ def main_worker(gpu, ngpus_per_node, args):
             plt.savefig(join(model_save_path, "log.png"))
             plt.close()
         dist.barrier()
-
+    if is_main_host and wandb_enable:
+        wandb.finish(quiet=True)
         
 # %%
 if __name__ == "__main__":
     args = get_args()
-    sanity_check_dataset(args)
+    # sanity_check_dataset(args)
     main(args)
