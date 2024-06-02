@@ -26,11 +26,18 @@ import torch.nn.functional as F
 from matplotlib import pyplot as plt
 import argparse
 
+torch.cuda.empty_cache()
+os.environ["OMP_NUM_THREADS"] = "4" # export OMP_NUM_THREADS=4
+os.environ["OPENBLAS_NUM_THREADS"] = "4" # export OPENBLAS_NUM_THREADS=4 
+os.environ["MKL_NUM_THREADS"] = "6" # export MKL_NUM_THREADS=6
+os.environ["VECLIB_MAXIMUM_THREADS"] = "4" # export VECLIB_MAXIMUM_THREADS=4
+os.environ["NUMEXPR_NUM_THREADS"] = "6" # export NUMEXPR_NUM_THREADS=6
+
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--tr_npy_path', type=str,
-                        default='data/npy/CT_Abd',
+                        default='data/npy',
                         help='Path to training npy files; two subfolders: gts and imgs')
     parser.add_argument('-task_name', type=str, default='MedSAM-Lite')
     parser.add_argument('-pretrained_checkpoint', type=str, default='lite_medsam.pth',
@@ -40,7 +47,7 @@ def get_args():
                         help='use data augmentation during training')
     # train
     parser.add_argument('-num_epochs', type=int, default=1000)
-    parser.add_argument('-batch_size', type=int, default=4)
+    parser.add_argument('-batch_size', type=int, default=8)
     parser.add_argument('-num_workers', type=int, default=8)
     # Optimizer parameters
     parser.add_argument('-weight_decay', type=float, default=0.01,
@@ -48,13 +55,11 @@ def get_args():
     parser.add_argument('-lr', type=float, default=0.0001, metavar='LR',
                         help='learning rate (absolute lr)')
     ## Distributed training args
-    parser.add_argument('-world_size', type=int, default=1,
-                        help='world size, Total number of GPUs will be used')
-    parser.add_argument('-node_rank', type=int, default=0,
-                        help='Node rank, if training on a single machine, set to 0')
+    parser.add_argument('-world_size', type=int, help='world size')
+    parser.add_argument('-node_rank', type=int, help='Node rank')
     parser.add_argument('-bucket_cap_mb', type = int, default = 25,
                         help='The amount of memory in Mb that DDP will accumulate before firing off gradient communication for the bucket (need to tune)')
-    parser.add_argument('-resume', type = str, default = 'lite_medsam.pth', required=False,
+    parser.add_argument('-resume', type = str, default = '', required=False,
                         help="Resuming training from a work_dir")
     parser.add_argument('-init_method', type = str, default = "env://")
     args = parser.parse_args()
@@ -315,17 +320,9 @@ class MedSAM_Lite(nn.Module):
         return masks
 
 def main(args):
-    torch.cuda.empty_cache()
-    os.environ["OMP_NUM_THREADS"] = "4" # export OMP_NUM_THREADS=4
-    os.environ["OPENBLAS_NUM_THREADS"] = "4" # export OPENBLAS_NUM_THREADS=4 
-    os.environ["MKL_NUM_THREADS"] = "6" # export MKL_NUM_THREADS=6
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "4" # export VECLIB_MAXIMUM_THREADS=4
-    os.environ["NUMEXPR_NUM_THREADS"] = "6" # export NUMEXPR_NUM_THREADS=6
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '10086'
     ngpus_per_node = torch.cuda.device_count()
     print("Spwaning processces")
-    mp.spawn(main_worker, nprocs=args.world_size, args=(ngpus_per_node, args))
+    mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
 
 
 def main_worker(gpu, ngpus_per_node, args):

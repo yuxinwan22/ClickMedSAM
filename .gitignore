@@ -12,6 +12,7 @@
 *.tar.gz
 data/
 wandb/
+work_dir/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
