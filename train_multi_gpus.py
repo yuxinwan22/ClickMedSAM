@@ -42,7 +42,7 @@ def get_args():
                         help='use data augmentation during training')
     # train
     parser.add_argument('-num_epochs', type=int, default=1000)
-    parser.add_argument('-batch_size', type=int, default=1)
+    parser.add_argument('-batch_size', type=int, default=2)
     parser.add_argument('-num_workers', type=int, default=8)
     
     # Optimizer parameters
@@ -62,8 +62,10 @@ def get_args():
                         help="Whether to do sanity check for dataloading.")
     
     ## Distributed training args
-    parser.add_argument('-world_size', type=int, default=4,
-                        help='world size, Total number of GPUs will be used')
+    # parser.add_argument('-world_size', type=int, default=1,
+    #                     help='world size, Total number of GPUs will be used')
+    parser.add_argument('-which_gpus', type=list, default=[5,6],
+                        help='Which GPUs will be used')
     parser.add_argument('-node_rank', type=int, default=0,
                         help='Node rank, if training on a single machine, set to 0')
     parser.add_argument('-bucket_cap_mb', type = int, default = 25,
@@ -417,16 +419,17 @@ def main(args):
     os.environ["NUMEXPR_NUM_THREADS"] = "6" # export NUMEXPR_NUM_THREADS=6
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '10086'
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.which_gpus).replace(' ', '').replace('[', '').replace(']', '')
     ngpus_per_node = torch.cuda.device_count()
-    print("Spwaning processces")
-    mp.spawn(main_worker, nprocs=args.world_size, args=(ngpus_per_node, args))
+    print("Spawning processces")
+    mp.spawn(main_worker, nprocs=len(args.which_gpus), args=(ngpus_per_node, args))
 
 
-def main_worker(gpu, ngpus_per_node, args):
+def main_worker(local_rank, ngpus_per_node, args):
     node_rank = int(args.node_rank)
-    rank = node_rank * ngpus_per_node + gpu
-    world_size = args.world_size
-    print(f"[Rank {rank}]: Use GPU: {gpu} for training")
+    rank = node_rank * ngpus_per_node + local_rank
+    world_size = len(args.which_gpus)
+    print(f"[Rank {rank}]: Use GPU: {args.which_gpus[local_rank]} for training")
     is_main_host = rank == 0
     if is_main_host:
         run_id = datetime.now().strftime("%Y%m%d-%H%M")
@@ -435,8 +438,8 @@ def main_worker(gpu, ngpus_per_node, args):
         copyfile(
             __file__, join(model_save_path, run_id + "_" + os.path.basename(__file__))
         )
-    torch.cuda.set_device(gpu)
-    device = torch.device("cuda:{}".format(gpu))
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda:{}".format(local_rank))
     dist.init_process_group(
         backend="nccl", init_method=args.init_method, rank=rank, world_size=world_size
     )
@@ -522,14 +525,15 @@ def main_worker(gpu, ngpus_per_node, args):
 
     medsam_lite_model = nn.parallel.DistributedDataParallel(
         medsam_lite_model,
-        device_ids=[gpu],
-        output_device=gpu,
+        device_ids=[local_rank],
+        output_device=local_rank,
         find_unused_parameters=True,
         bucket_cap_mb=args.bucket_cap_mb
     )
     medsam_lite_model.train()
     # %%
-    print(f"MedSAM Lite size: {sum(p.numel() for p in medsam_lite_model.parameters())}")
+    if rank == 0:
+        print(f"MedSAM Lite size: {sum(p.numel() for p in medsam_lite_model.parameters())}")
     # %%
     optimizer = optim.AdamW(
         medsam_lite_model.parameters(),
@@ -588,7 +592,10 @@ def main_worker(gpu, ngpus_per_node, args):
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = [1e10 for _ in range(len(train_loader))]
         epoch_start_time = time()
-        pbar = tqdm(train_loader)
+        if rank == 0:
+            pbar = tqdm(train_loader)
+        else:
+            pbar = train_loader
         for step, batch in enumerate(pbar):
             image = batch["image"]
             gt2D = batch["gt2D"]
@@ -622,7 +629,9 @@ def main_worker(gpu, ngpus_per_node, args):
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-            pbar.set_description(f"[RANK {rank}] Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
+            # pbar.set_description(f"[RANK {rank}] Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
+            if rank == 0:
+                pbar.set_description(f"Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
 
         epoch_end_time = time()
         epoch_duration = epoch_end_time - epoch_start_time
@@ -647,7 +656,8 @@ def main_worker(gpu, ngpus_per_node, args):
             }
             torch.save(checkpoint, join(model_save_path, "medsam_lite_latest.pth"))
         if epoch_loss_reduced < best_loss:
-            print(f"New best loss: {best_loss:.4f} -> {epoch_loss_reduced:.4f}")
+            if rank == 0:
+                print(f"New best loss: {best_loss:.4f} -> {epoch_loss_reduced:.4f}")
             best_loss = epoch_loss_reduced
             if is_main_host:
                 checkpoint["best_loss"] = best_loss
