@@ -41,8 +41,10 @@ def get_args():
     parser.add_argument('--data_aug', action='store_true', default=False,
                         help='use data augmentation during training')
     # train
-    parser.add_argument('-num_epochs', type=int, default=1000)
-    parser.add_argument('-batch_size', type=int, default=2)
+    parser.add_argument('-num_epochs', type=int, default=50)
+    parser.add_argument('-batch_size', type=int, default=4)
+    parser.add_argument('-which_gpus', type=list, default=[3,4,5,6],
+                        help='Which GPUs will be used')
     parser.add_argument('-num_workers', type=int, default=8)
     
     # Optimizer parameters
@@ -64,8 +66,8 @@ def get_args():
     ## Distributed training args
     # parser.add_argument('-world_size', type=int, default=1,
     #                     help='world size, Total number of GPUs will be used')
-    parser.add_argument('-which_gpus', type=list, default=[5,6],
-                        help='Which GPUs will be used')
+    # parser.add_argument('-which_gpus', type=list, default=[5,6],
+    #                     help='Which GPUs will be used')
     parser.add_argument('-node_rank', type=int, default=0,
                         help='Node rank, if training on a single machine, set to 0')
     parser.add_argument('-bucket_cap_mb', type = int, default = 25,
@@ -81,7 +83,7 @@ def get_args():
                         help="the place to save your runs. can be your wandb username or team name")
     parser.add_argument("-wandb_project", type=str, default="wan_test",
                         help="Name of WandB project")
-    parser.add_argument("-wandb_name", type=str, default="debug_multi_gpu",
+    parser.add_argument("-wandb_name", type=str, default="click_mask_flare22",
                         help="wandb run name")
     parser.add_argument("-wandb_api_key", type=str, default="3fbca40760ef6b876bd8b91911d1008dad6a7b09",
                         help="wandb api key")
@@ -418,10 +420,10 @@ def main(args):
     os.environ["VECLIB_MAXIMUM_THREADS"] = "4" # export VECLIB_MAXIMUM_THREADS=4
     os.environ["NUMEXPR_NUM_THREADS"] = "6" # export NUMEXPR_NUM_THREADS=6
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '10086'
+    os.environ['MASTER_PORT'] = '10010'
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.which_gpus).replace(' ', '').replace('[', '').replace(']', '')
     ngpus_per_node = torch.cuda.device_count()
-    print("Spawning processces")
+    print("Spawning processes")
     mp.spawn(main_worker, nprocs=len(args.which_gpus), args=(ngpus_per_node, args))
 
 
@@ -532,7 +534,7 @@ def main_worker(local_rank, ngpus_per_node, args):
     )
     medsam_lite_model.train()
     # %%
-    if rank == 0:
+    if is_main_host:
         print(f"MedSAM Lite size: {sum(p.numel() for p in medsam_lite_model.parameters())}")
     # %%
     optimizer = optim.AdamW(
@@ -592,7 +594,7 @@ def main_worker(local_rank, ngpus_per_node, args):
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = [1e10 for _ in range(len(train_loader))]
         epoch_start_time = time()
-        if rank == 0:
+        if is_main_host:
             pbar = tqdm(train_loader)
         else:
             pbar = train_loader
@@ -630,7 +632,7 @@ def main_worker(local_rank, ngpus_per_node, args):
             optimizer.step()
             optimizer.zero_grad()
             # pbar.set_description(f"[RANK {rank}] Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
-            if rank == 0:
+            if is_main_host:
                 pbar.set_description(f"Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
 
         epoch_end_time = time()
