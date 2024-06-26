@@ -32,8 +32,11 @@ import shutil
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--tr_npy_path', type=str,
-                        default='data/npy/CT_Abd',
+                        default='data/npy',
                         help='Path to training npy files; two subfolders: gts and imgs')
+    parser.add_argument('-v', '--val_npy_path', type=str,
+                        default='data/npy/CT_Abd',
+                        help='Path to validating npy files; two subfolders: gts and imgs')
     parser.add_argument('-task_name', type=str, default='MedSAM-Lite')
     parser.add_argument('-pretrained_checkpoint', type=str, default='lite_medsam.pth',
                         help='Path to pretrained MedSAM-Lite checkpoint')
@@ -45,7 +48,7 @@ def get_args():
     parser.add_argument('-batch_size', type=int, default=4)
     parser.add_argument('-which_gpus', type=list, default=[3,4,5,6],
                         help='Which GPUs will be used')
-    parser.add_argument('-num_workers', type=int, default=8)
+    parser.add_argument('-num_workers', type=int, default=16)
     
     # Optimizer parameters
     parser.add_argument('-weight_decay', type=float, default=0.01,
@@ -83,10 +86,22 @@ def get_args():
                         help="the place to save your runs. can be your wandb username or team name")
     parser.add_argument("-wandb_project", type=str, default="wan_test",
                         help="Name of WandB project")
-    parser.add_argument("-wandb_name", type=str, default="click_mask_flare22",
+    parser.add_argument("-wandb_name", type=str, default="click_mask_debug",
                         help="wandb run name")
     parser.add_argument("-wandb_api_key", type=str, default="3fbca40760ef6b876bd8b91911d1008dad6a7b09",
                         help="wandb api key")
+    
+    ## interfaces
+    parser.add_argument("-prompt_mode", type=str, default="click_mask",
+                        help="bbox, click_re, click_mask")
+    parser.add_argument("-num_clicks", type=int, default="10",
+                        help="number of candidate clicks, only valuable when prompt mode is click_re!")
+    parser.add_argument("-num_reselect", type=int, default="3",
+                        help="number of reselected clicks, only valuable when prompt mode is click_re!")
+    
+    
+    
+    
     args = parser.parse_args()
 
     return args
@@ -146,7 +161,7 @@ def revert_sync_batchnorm(module: torch.nn.Module) -> torch.nn.Module:
 
 
 class NpyDataset(Dataset): 
-    def __init__(self, data_root, image_size=256, bbox_shift=5, data_aug=True):
+    def __init__(self, data_root, image_size=256, bbox_shift=5, data_aug=True, num_clicks=10):
         self.data_root = data_root
         self.gt_path = join(data_root, 'gts')
         self.img_path = join(data_root, 'imgs')
@@ -159,12 +174,12 @@ class NpyDataset(Dataset):
         self.target_length = image_size
         self.bbox_shift = bbox_shift
         self.data_aug = data_aug
+        self.num_clicks = num_clicks
     
     def __len__(self):
         return len(self.gt_path_files)
 
     def __getitem__(self, index):
-        num_clicks = 10
         img_name = basename(self.gt_path_files[index])
         assert img_name == basename(self.gt_path_files[index]), 'img gt name error' + self.gt_path_files[index] + self.npy_files[index]
         img_3c = np.load(join(self.img_path, img_name), 'r', allow_pickle=True) # (H, W, 3)
@@ -203,7 +218,7 @@ class NpyDataset(Dataset):
         gt2D = np.uint8(gt2D > 0)
         y_indices, x_indices = np.where(gt2D > 0)
         clicks_coords = torch.stack([torch.tensor(y_indices, dtype=torch.int64), torch.tensor(x_indices, dtype=torch.int64)], dim=1)
-        clicks_coords = clicks_coords[torch.randperm(clicks_coords.shape[0])[:num_clicks]]
+        clicks_coords = clicks_coords[torch.randperm(clicks_coords.shape[0])[:self.num_clicks]]
         click_labels = torch.tensor(label, dtype=torch.float32).repeat(clicks_coords.shape[0])
         
         x_min, x_max = np.min(x_indices), np.max(x_indices)
@@ -319,12 +334,12 @@ class MedSAM_Lite(nn.Module):
         self.mask_decoder = mask_decoder
         self.prompt_encoder = prompt_encoder
         
-    def forward(self, image, click, mask=None):
+    def forward(self, image, boxes=None, clicks=None, mask=None):
         image_embedding = self.image_encoder(image) # (B, 256, 64, 64)
 
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
-            boxes=None,
-            points=click,
+            boxes=boxes,
+            points=clicks,
             masks=mask,
         )
         low_res_masks, iou_predictions = self.mask_decoder(
@@ -421,6 +436,7 @@ def main(args):
     os.environ["NUMEXPR_NUM_THREADS"] = "6" # export NUMEXPR_NUM_THREADS=6
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '10010'
+    # os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.which_gpus).replace(' ', '').replace('[', '').replace(']', '')
     ngpus_per_node = torch.cuda.device_count()
     print("Spawning processes")
@@ -555,9 +571,10 @@ def main_worker(local_rank, ngpus_per_node, args):
     ce_loss = nn.BCEWithLogitsLoss(reduction='mean')
     iou_loss = nn.MSELoss(reduction='mean')
     # %%
-    data_root = args.tr_npy_path
-    train_dataset = NpyDataset(data_root=data_root, data_aug=True)
+    train_dataset = NpyDataset(data_root=args.tr_npy_path, data_aug=True, num_clicks=args.num_clicks)
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    val_dataset = NpyDataset(data_root=args.val_npy_path, data_aug=False, num_clicks=args.num_clicks)
+    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -565,6 +582,14 @@ def main_worker(local_rank, ngpus_per_node, args):
         num_workers=num_workers,
         pin_memory=True,
         sampler=train_sampler
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        sampler=val_sampler
     )
     # %%
 
@@ -590,9 +615,11 @@ def main_worker(local_rank, ngpus_per_node, args):
         best_loss = 1e10
 
     train_losses = []
+    val_losses = []
     epoch_times = []
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = [1e10 for _ in range(len(train_loader))]
+        epoch_loss_val = [1e10 for _ in range(len(val_loader))]
         epoch_start_time = time()
         if is_main_host:
             pbar = tqdm(train_loader)
@@ -607,24 +634,32 @@ def main_worker(local_rank, ngpus_per_node, args):
             random_index = torch.randint(0, clicks[0].size(1), (1,))
             click = (clicks[0][:, random_index, :], clicks[1][:, random_index])
             optimizer.zero_grad()
-            image, gt2D, click = image.to(device), gt2D.to(device), (click[0].to(device), click[1].to(device))
+            image, gt2D, click, boxes = image.to(device), gt2D.to(device), (click[0].to(device), click[1].to(device)), boxes.to(device)
             
-            # logits_pred = None
-            # for i in range(3):
-            #     logits_pred, iou_pred = medsam_lite_model(image, click)
-            #     if i != 2:
-            #         click = reselect_click(batch_size, clicks, logits_pred, click)
-            #     else:
-            #         del click
-                    
-            # medsam_lite_model.eval()
-            with torch.no_grad():
-                logits_pred0, _ = medsam_lite_model(image, click)
-                logits_pred1, _ = medsam_lite_model(image, click, logits_pred0)
-                del logits_pred0
-            medsam_lite_model.train()
-            logits_pred, iou_pred = medsam_lite_model(image, click, logits_pred1)
-            del logits_pred1
+            if args.prompt_mode == "click_re":
+                logits_pred = None
+                for i in range(args.num_reselect):
+                    if i != args.num_reselect - 1:
+                        with torch.no_grad():
+                            logits_pred_tmp, _ = medsam_lite_model(image, None, click, None)
+                            click = reselect_click(batch_size, clicks, logits_pred_tmp, click)
+                    else:
+                        del logits_pred_tmp
+                        medsam_lite_model.train()
+                        logits_pred, iou_pred = medsam_lite_model(image, None, click, None)
+                        del click
+            elif args.prompt_mode == "click_mask":  
+                with torch.no_grad():
+                    logits_pred0, _ = medsam_lite_model(image, None, click, None)
+                    logits_pred1, _ = medsam_lite_model(image, None, click, logits_pred0)
+                    del logits_pred0
+                medsam_lite_model.train()
+                logits_pred, iou_pred = medsam_lite_model(image, None, click, logits_pred1)
+                del logits_pred1
+            elif args.prompt_mode == "bbox":
+                logits_pred, iou_pred = medsam_lite_model(image, boxes, None, None)
+            else:
+                raise ValueError("Invalid prompt mode! Please enter click_mask or click_re or bbox")
 
             loss = cal_loss(pred=(logits_pred, iou_pred),gt=gt2D, seg=(seg_loss, args.seg_loss_weight), ce=(ce_loss, args.ce_loss_weight), iou=(iou_loss, args.iou_loss_weight))
             epoch_loss[step] = loss.item()
@@ -634,17 +669,60 @@ def main_worker(local_rank, ngpus_per_node, args):
             # pbar.set_description(f"[RANK {rank}] Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
             if is_main_host:
                 pbar.set_description(f"Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
-
+        
+        validation = True
+        if validation == True:
+            with torch.no_grad():
+                medsam_lite_model.eval()
+                for step, batch in enumerate(val_loader):
+                    image = batch["image"]
+                    gt2D = batch["gt2D"]
+                    boxes = batch["bboxes"]
+                    clicks = batch["clicks"]
+                    clicks = (clicks[0].to(device), clicks[1].to(device))
+                    random_index = torch.randint(0, clicks[0].size(1), (1,))
+                    click = (clicks[0][:, random_index, :], clicks[1][:, random_index])
+                    optimizer.zero_grad()
+                    image, gt2D, click, boxes = image.to(device), gt2D.to(device), (click[0].to(device), click[1].to(device)), boxes.to(device)
+                    
+                    if args.prompt_mode == "click_re":
+                        logits_pred = None
+                        for i in range(args.num_reselect):
+                            if i != args.num_reselect - 1:
+                                with torch.no_grad():
+                                    logits_pred_tmp, _ = medsam_lite_model(image, None, click, None)
+                                    click = reselect_click(batch_size, clicks, logits_pred_tmp, click)
+                            else:
+                                del logits_pred_tmp
+                                logits_pred, iou_pred = medsam_lite_model(image, None, click, None)
+                                del click
+                    elif args.prompt_mode == "click_mask":  
+                        logits_pred0, _ = medsam_lite_model(image, None, click, None)
+                        logits_pred1, _ = medsam_lite_model(image, None, click, logits_pred0)
+                        del logits_pred0
+                        logits_pred, iou_pred = medsam_lite_model(image, None, click, logits_pred1)
+                        del logits_pred1
+                    elif args.prompt_mode == "bbox":
+                        logits_pred, iou_pred = medsam_lite_model(image, boxes, None, None)
+                    else:
+                        raise ValueError("Invalid prompt mode! Please enter click_mask or click_re or bbox")
+                    val_loss = cal_loss(pred=(logits_pred, iou_pred),gt=gt2D, seg=(seg_loss, args.seg_loss_weight), ce=(ce_loss, args.ce_loss_weight), iou=(iou_loss, args.iou_loss_weight))
+                    epoch_loss_val[step] = val_loss.item()
         epoch_end_time = time()
         epoch_duration = epoch_end_time - epoch_start_time
         epoch_times.append(epoch_duration)
         epoch_loss_world = [None for _ in range(world_size)]
+        epoch_loss_world_val = [None for _ in range(world_size)]
         dist.all_gather_object(epoch_loss_world, epoch_loss)
+        dist.all_gather_object(epoch_loss_world_val, epoch_loss_val)
         epoch_loss_reduced = np.vstack(epoch_loss_world).mean()
+        epoch_loss_reduced_val = np.vstack(epoch_loss_world_val).mean()
         train_losses.append(epoch_loss_reduced)
+        val_losses.append(epoch_loss_reduced_val)
         lr_scheduler.step(epoch_loss_reduced)
         if is_main_host and wandb_enable:
-            wandb.log({"train_loss": epoch_loss_reduced})
+            wandb.log({"train_loss": epoch_loss_reduced,
+                       "val_loss": epoch_loss_reduced_val})
 
         if is_main_host:
             module_revert_sync_BN = revert_sync_batchnorm(deepcopy(medsam_lite_model.module))
