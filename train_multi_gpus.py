@@ -32,7 +32,7 @@ import shutil
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--tr_npy_path', type=str,
-                        default='data/npy',
+                        default='data/npy/CT_Abd',
                         help='Path to training npy files; two subfolders: gts and imgs')
     parser.add_argument('-v', '--val_npy_path', type=str,
                         default='data/npy/CT_Abd',
@@ -45,7 +45,7 @@ def get_args():
                         help='use data augmentation during training')
     # train
     parser.add_argument('-num_epochs', type=int, default=50)
-    parser.add_argument('-batch_size', type=int, default=4)
+    parser.add_argument('-batch_size', type=int, default=2)
     parser.add_argument('-which_gpus', type=list, default=[3,4,5,6],
                         help='Which GPUs will be used')
     parser.add_argument('-num_workers', type=int, default=16)
@@ -92,7 +92,7 @@ def get_args():
                         help="wandb api key")
     
     ## interfaces
-    parser.add_argument("-prompt_mode", type=str, default="click_mask",
+    parser.add_argument("-prompt_mode", type=str, default="click_re",
                         help="bbox, click_re, click_mask")
     parser.add_argument("-num_clicks", type=int, default="10",
                         help="number of candidate clicks, only valuable when prompt mode is click_re!")
@@ -436,7 +436,7 @@ def main(args):
     os.environ["NUMEXPR_NUM_THREADS"] = "6" # export NUMEXPR_NUM_THREADS=6
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '10010'
-    # os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+    os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.which_gpus).replace(' ', '').replace('[', '').replace(']', '')
     ngpus_per_node = torch.cuda.device_count()
     print("Spawning processes")
@@ -642,7 +642,7 @@ def main_worker(local_rank, ngpus_per_node, args):
                     if i != args.num_reselect - 1:
                         with torch.no_grad():
                             logits_pred_tmp, _ = medsam_lite_model(image, None, click, None)
-                            click = reselect_click(batch_size, clicks, logits_pred_tmp, click)
+                            # click = reselect_click(batch_size, clicks, logits_pred_tmp, click)
                     else:
                         del logits_pred_tmp
                         medsam_lite_model.train()
@@ -691,7 +691,7 @@ def main_worker(local_rank, ngpus_per_node, args):
                             if i != args.num_reselect - 1:
                                 with torch.no_grad():
                                     logits_pred_tmp, _ = medsam_lite_model(image, None, click, None)
-                                    click = reselect_click(batch_size, clicks, logits_pred_tmp, click)
+                                    # click = reselect_click(batch_size, clicks, logits_pred_tmp, click)
                             else:
                                 del logits_pred_tmp
                                 logits_pred, iou_pred = medsam_lite_model(image, None, click, None)
