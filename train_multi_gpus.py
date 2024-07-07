@@ -32,20 +32,20 @@ import shutil
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--tr_npy_path', type=str,
-                        default='data/npy/CT_Abd',
+                        default='data/npy',
                         help='Path to training npy files; two subfolders: gts and imgs')
     parser.add_argument('-v', '--val_npy_path', type=str,
                         default='data/npy/CT_Abd',
                         help='Path to validating npy files; two subfolders: gts and imgs')
     parser.add_argument('-task_name', type=str, default='MedSAM-Lite')
-    parser.add_argument('-pretrained_checkpoint', type=str, default='lite_medsam.pth',
+    parser.add_argument('-pretrained_checkpoint', type=str, default='',
                         help='Path to pretrained MedSAM-Lite checkpoint')
     parser.add_argument('-work_dir', type=str, default='./work_dir')
-    parser.add_argument('--data_aug', action='store_true', default=False,
+    parser.add_argument('--data_aug', action='store_true', default=True,
                         help='use data augmentation during training')
     # train
     parser.add_argument('-num_epochs', type=int, default=50)
-    parser.add_argument('-batch_size', type=int, default=2)
+    parser.add_argument('-batch_size', type=int, default=4)
     parser.add_argument('-which_gpus', type=list, default=[3,4,5,6],
                         help='Which GPUs will be used')
     parser.add_argument('-num_workers', type=int, default=16)
@@ -84,15 +84,15 @@ def get_args():
                         help="")
     parser.add_argument("-wandb_entity", type=str, default="CVHCI_p24gF_ClickMedSAM",
                         help="the place to save your runs. can be your wandb username or team name")
-    parser.add_argument("-wandb_project", type=str, default="wan_test",
+    parser.add_argument("-wandb_project", type=str, default="finetune",
                         help="Name of WandB project")
-    parser.add_argument("-wandb_name", type=str, default="click_mask_debug",
+    parser.add_argument("-wandb_name", type=str, default="litemedsam_original",
                         help="wandb run name")
     parser.add_argument("-wandb_api_key", type=str, default="3fbca40760ef6b876bd8b91911d1008dad6a7b09",
                         help="wandb api key")
     
     ## interfaces
-    parser.add_argument("-prompt_mode", type=str, default="click_re",
+    parser.add_argument("-prompt_mode", type=str, default="bbox",
                         help="bbox, click_re, click_mask")
     parser.add_argument("-num_clicks", type=int, default="10",
                         help="number of candidate clicks, only valuable when prompt mode is click_re!")
@@ -435,7 +435,7 @@ def main(args):
     os.environ["VECLIB_MAXIMUM_THREADS"] = "4" # export VECLIB_MAXIMUM_THREADS=4
     os.environ["NUMEXPR_NUM_THREADS"] = "6" # export NUMEXPR_NUM_THREADS=6
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '10010'
+    os.environ['MASTER_PORT'] = '10086'
     os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.which_gpus).replace(' ', '').replace('[', '').replace(']', '')
     ngpus_per_node = torch.cuda.device_count()
@@ -451,7 +451,7 @@ def main_worker(local_rank, ngpus_per_node, args):
     is_main_host = rank == 0
     if is_main_host:
         run_id = datetime.now().strftime("%Y%m%d-%H%M")
-        model_save_path = join(args.work_dir, args.task_name + "-" + run_id)
+        model_save_path = join(args.work_dir, args.wandb_name + "-" + run_id)
         makedirs(model_save_path, exist_ok=True)
         copyfile(
             __file__, join(model_save_path, run_id + "_" + os.path.basename(__file__))
@@ -531,6 +531,8 @@ def main_worker(local_rank, ngpus_per_node, args):
         print(f"Loading pretrained checkpoint from {args.pretrained_checkpoint}")
         medsam_lite_checkpoint = torch.load(args.pretrained_checkpoint, map_location="cpu")
         medsam_lite_model.load_state_dict(medsam_lite_checkpoint, strict=True)
+    else:
+        print(f"Pretained weights {args.pretrained_checkpoint} not found, training from scratch")
 
     medsam_lite_model = medsam_lite_model.to(device)
 
@@ -736,7 +738,7 @@ def main_worker(local_rank, ngpus_per_node, args):
             }
             torch.save(checkpoint, join(model_save_path, "medsam_lite_latest.pth"))
         if epoch_loss_reduced < best_loss:
-            if rank == 0:
+            if is_main_host:
                 print(f"New best loss: {best_loss:.4f} -> {epoch_loss_reduced:.4f}")
             best_loss = epoch_loss_reduced
             if is_main_host:
