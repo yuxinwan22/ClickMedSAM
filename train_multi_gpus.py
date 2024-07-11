@@ -323,39 +323,35 @@ def sanity_check_dataset(args):
         break
 
 def visualize_predictions(image, gt2D, logits_pred, click, step, save_path=None):
-    plt.figure(figsize=(15, 5))
+    plt.figure(figsize=(10, 5))
 
     # 绘制点击点的辅助函数
     def plot_clicks(coords, labels):
-        # coords = coords.squeeze(0)  # 去掉批次维度
-        # labels = labels.squeeze(0)  # 去掉批次维度
         for click_idx in range(coords.shape[0]):
             coord = coords[click_idx]
             label = labels[click_idx]
-            plt.scatter(coord[1], coord[0], color='red' if label == 1 else 'blue', marker='x')
+            plt.scatter(coord[1], coord[0], color='blue' if label == 1 else 'blue', marker='x')
 
-    # 原始图像
-    plt.subplot(1, 3, 1)
+    # 图像带真实掩码和点击点
+    plt.subplot(1, 2, 1)
     plt.imshow(image.permute(1, 2, 0).cpu().numpy())
+    # 绘制真实掩码
+    plt.imshow(gt2D.squeeze().cpu().numpy(), cmap='viridis', alpha=0.5)  # 叠加真实掩码
     # 绘制点击点
     plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
-    plt.title('Original Image with Clicks')
+    plt.title('Image with Ground Truth Mask and Clicks')
     plt.axis('off')
 
-    # 真实掩码
-    plt.subplot(1, 3, 2)
-    plt.imshow(gt2D.squeeze().cpu().numpy(), cmap='gray')  # 使用squeeze()去掉单个维度
+    # 图像带预测掩码和点击点
+    plt.subplot(1, 2, 2)
+    plt.imshow(image.permute(1, 2, 0).cpu().numpy())
+    # 绘制预测掩码
+    pred_mask = logits_pred[0].squeeze().detach().cpu().numpy()
+    pred_mask_bin = (pred_mask > 0.5).astype(np.uint8)
+    plt.imshow(pred_mask_bin, cmap='viridis', alpha=0.5)  # 叠加预测掩码
     # 绘制点击点
     plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
-    plt.title('Ground Truth Mask with Clicks')
-    plt.axis('off')
-
-    # 预测掩码
-    plt.subplot(1, 3, 3)
-    plt.imshow(torch.sigmoid(logits_pred[0]).squeeze().detach().cpu().numpy(), cmap='gray')  # 使用detach()分离梯度
-    # 绘制点击点
-    plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
-    plt.title('Predicted Mask with Clicks')
+    plt.title('Image with Prediction Mask and Clicks')
     plt.axis('off')
 
     plt.suptitle(f'Step {step}')
