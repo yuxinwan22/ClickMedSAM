@@ -32,21 +32,21 @@ import shutil
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--tr_npy_path', type=str,
-                        default='data/npy',
+                        default='data/npy/CT_Abd',
                         help='Path to training npy files; two subfolders: gts and imgs')
     parser.add_argument('-v', '--val_npy_path', type=str,
                         default='data/npy/CT_Abd',
                         help='Path to validating npy files; two subfolders: gts and imgs')
     parser.add_argument('-task_name', type=str, default='MedSAM-Lite')
-    parser.add_argument('-pretrained_checkpoint', type=str, default='',
+    parser.add_argument('-pretrained_checkpoint', type=str, default='/home/ies/wan/ClickMedSAM/work_dir/LiteMedSAM/lite_medsam.pth',
                         help='Path to pretrained MedSAM-Lite checkpoint')
     parser.add_argument('-work_dir', type=str, default='./work_dir')
     parser.add_argument('--data_aug', action='store_true', default=True,
                         help='use data augmentation during training')
     # train
     parser.add_argument('-num_epochs', type=int, default=50)
-    parser.add_argument('-batch_size', type=int, default=4)
-    parser.add_argument('-which_gpus', type=list, default=[3,4,5,6],
+    parser.add_argument('-batch_size', type=int, default=2)
+    parser.add_argument('-which_gpus', type=list, default=[0,1,2,3],
                         help='Which GPUs will be used')
     parser.add_argument('-num_workers', type=int, default=16)
     
@@ -84,15 +84,15 @@ def get_args():
                         help="")
     parser.add_argument("-wandb_entity", type=str, default="CVHCI_p24gF_ClickMedSAM",
                         help="the place to save your runs. can be your wandb username or team name")
-    parser.add_argument("-wandb_project", type=str, default="finetune",
+    parser.add_argument("-wandb_project", type=str, default="wan_test",
                         help="Name of WandB project")
-    parser.add_argument("-wandb_name", type=str, default="litemedsam_original",
+    parser.add_argument("-wandb_name", type=str, default="debug",
                         help="wandb run name")
     parser.add_argument("-wandb_api_key", type=str, default="3fbca40760ef6b876bd8b91911d1008dad6a7b09",
                         help="wandb api key")
     
     ## interfaces
-    parser.add_argument("-prompt_mode", type=str, default="bbox",
+    parser.add_argument("-prompt_mode", type=str, default="click_mask",
                         help="bbox, click_re, click_mask")
     parser.add_argument("-num_clicks", type=int, default="10",
                         help="number of candidate clicks, only valuable when prompt mode is click_re!")
@@ -322,6 +322,49 @@ def sanity_check_dataset(args):
         plt.close()
         break
 
+def visualize_predictions(image, gt2D, logits_pred, click, step, save_path=None):
+    plt.figure(figsize=(15, 5))
+
+    # 绘制点击点的辅助函数
+    def plot_clicks(coords, labels):
+        # coords = coords.squeeze(0)  # 去掉批次维度
+        # labels = labels.squeeze(0)  # 去掉批次维度
+        for click_idx in range(coords.shape[0]):
+            coord = coords[click_idx]
+            label = labels[click_idx]
+            plt.scatter(coord[1], coord[0], color='red' if label == 1 else 'blue', marker='x')
+
+    # 原始图像
+    plt.subplot(1, 3, 1)
+    plt.imshow(image.permute(1, 2, 0).cpu().numpy())
+    # 绘制点击点
+    plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
+    plt.title('Original Image with Clicks')
+    plt.axis('off')
+
+    # 真实掩码
+    plt.subplot(1, 3, 2)
+    plt.imshow(gt2D.squeeze().cpu().numpy(), cmap='gray')  # 使用squeeze()去掉单个维度
+    # 绘制点击点
+    plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
+    plt.title('Ground Truth Mask with Clicks')
+    plt.axis('off')
+
+    # 预测掩码
+    plt.subplot(1, 3, 3)
+    plt.imshow(torch.sigmoid(logits_pred[0]).squeeze().detach().cpu().numpy(), cmap='gray')  # 使用detach()分离梯度
+    # 绘制点击点
+    plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
+    plt.title('Predicted Mask with Clicks')
+    plt.axis('off')
+
+    plt.suptitle(f'Step {step}')
+
+    if save_path:
+        plt.savefig(save_path)
+    else:
+        plt.show()
+
 # %%
 class MedSAM_Lite(nn.Module):
     def __init__(self, 
@@ -528,11 +571,13 @@ def main_worker(local_rank, ngpus_per_node, args):
     
     if (not os.path.exists(args.resume)) and isfile(args.pretrained_checkpoint):
         ## Load pretrained checkpoint if there's no checkpoint to resume from and there's a pretrained checkpoint
-        print(f"Loading pretrained checkpoint from {args.pretrained_checkpoint}")
+        if is_main_host:
+            print(f"Loading pretrained checkpoint from {args.pretrained_checkpoint}")
         medsam_lite_checkpoint = torch.load(args.pretrained_checkpoint, map_location="cpu")
         medsam_lite_model.load_state_dict(medsam_lite_checkpoint, strict=True)
     else:
-        print(f"Pretained weights {args.pretrained_checkpoint} not found, training from scratch")
+        if is_main_host:
+            print(f"Pretained weights {args.pretrained_checkpoint} not found, training from scratch")
 
     medsam_lite_model = medsam_lite_model.to(device)
 
@@ -657,9 +702,11 @@ def main_worker(local_rank, ngpus_per_node, args):
                     del logits_pred0
                 medsam_lite_model.train()
                 logits_pred, iou_pred = medsam_lite_model(image, None, click, logits_pred1)
+                visualize_predictions(image[0], gt2D[0], logits_pred, click, epoch, save_path=f'visualization_epoch_{epoch}.png')
                 del logits_pred1
             elif args.prompt_mode == "bbox":
                 logits_pred, iou_pred = medsam_lite_model(image, boxes, None, None)
+                visualize_predictions(image[0], gt2D[0], logits_pred, click, epoch, save_path=f'visualization_epoch_{epoch}.png')
             else:
                 raise ValueError("Invalid prompt mode! Please enter click_mask or click_re or bbox")
 
