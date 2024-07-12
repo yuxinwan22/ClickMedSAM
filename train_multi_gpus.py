@@ -64,14 +64,14 @@ def get_args():
     parser.add_argument('-v', '--val_npy_path', type=str,
                         default='data/npy/CT_Abd',
                         help='Path to validating npy files; two subfolders: gts and imgs')
-    parser.add_argument('-task_name', type=str, default='MedSAM-Lite')
+    parser.add_argument('-task_name', type=str, default='click_mask_pre')
     parser.add_argument('-pretrained_checkpoint', type=str, default='/home/ies/wan/ClickMedSAM/work_dir/LiteMedSAM/lite_medsam.pth',
                         help='Path to pretrained MedSAM-Lite checkpoint')
     parser.add_argument('-work_dir', type=str, default='./work_dir')
     parser.add_argument('--data_aug', action='store_true', default=True,
                         help='use data augmentation during training')
     # train
-    parser.add_argument('-num_epochs', type=int, default=50)
+    parser.add_argument('-num_epochs', type=int, default=150)
     parser.add_argument('-batch_size', type=int, default=2)
     parser.add_argument('-which_gpus', type=list, default=[1],
                         help='Which GPUs will be used')
@@ -102,7 +102,7 @@ def get_args():
                         help='Node rank, if training on a single machine, set to 0')
     parser.add_argument('-bucket_cap_mb', type = int, default = 25,
                         help='The amount of memory in Mb that DDP will accumulate before firing off gradient communication for the bucket (need to tune)')
-    parser.add_argument('-resume', type = str, default = 'lite_medsam.pth', required=False,
+    parser.add_argument('-resume', type = str, default = 'work_dir/click_mask_pre_epoch100-20240708-1052/medsam_lite_best.pth', required=False,
                         help="Resuming training from a work_dir")
     parser.add_argument('-init_method', type = str, default = "env://")
     
@@ -694,15 +694,15 @@ def main_worker(local_rank, ngpus_per_node, args):
     # %%
 
     if os.path.exists(args.resume):
-        ckpt_folders = sorted(listdir(args.resume))
-        ckpt_folders = [f for f in ckpt_folders if (f.startswith(args.task_name) and isfile(join(args.resume, f, 'medsam_lite_latest.pth')))]
+        # ckpt_folders = sorted(listdir(args.resume))
+        # ckpt_folders = [f for f in ckpt_folders if (f.startswith(args.task_name) and isfile(join(args.resume, f, 'medsam_lite_latest.pth')))]
         print('*'*20)
-        print('existing ckpts in', args.resume, ckpt_folders)
+        # print('existing ckpts in', args.resume, ckpt_folders)
         # find the latest ckpt folders
-        time_strings = [f.split(args.task_name + '-')[-1] for f in ckpt_folders]
-        dates = [datetime.strptime(f, '%Y%m%d-%H%M') for f in time_strings]
-        latest_date = max(dates)
-        latest_ckpt = join(args.work_dir, args.task_name + '-' + latest_date.strftime('%Y%m%d-%H%M'), 'medsam_lite_latest.pth')
+        # time_strings = [f.split(args.task_name + '-')[-1] for f in ckpt_folders]
+        # dates = [datetime.strptime(f, '%Y%m%d-%H%M') for f in time_strings]
+        # latest_date = max(dates)
+        latest_ckpt = args.resume
         print('Loading from', latest_ckpt)
         checkpoint = torch.load(latest_ckpt, map_location=device)
         medsam_lite_model.module.load_state_dict(checkpoint["model"])
