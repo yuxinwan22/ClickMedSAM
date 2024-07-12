@@ -24,10 +24,37 @@ import cv2
 import torch.nn.functional as F
 
 from matplotlib import pyplot as plt
+from matplotlib.colors import ListedColormap
 import argparse
 
 import wandb
 import shutil
+
+colors = [
+    (255, 0, 0),
+    (0, 255, 0),
+    (0, 0, 255),
+    (255, 255, 0),
+    (255, 0, 255),
+    (0, 255, 255),
+    (128, 0, 0),
+    (0, 128, 0),
+    (0, 0, 128),
+    (128, 128, 0),
+    (128, 0, 128),
+    (0, 128, 128),
+    (255, 255, 255),
+    (192, 192, 192),
+    (64, 64, 64),
+    (255, 0, 255),
+    (0, 255, 255),
+    (255, 255, 0),
+    (0, 0, 127),
+    (192, 0, 192),
+]
+
+colors = [(r/255, g/255, b/255) for r, g, b in colors]
+
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -46,7 +73,7 @@ def get_args():
     # train
     parser.add_argument('-num_epochs', type=int, default=50)
     parser.add_argument('-batch_size', type=int, default=2)
-    parser.add_argument('-which_gpus', type=list, default=[0,1,2,3],
+    parser.add_argument('-which_gpus', type=list, default=[1],
                         help='Which GPUs will be used')
     parser.add_argument('-num_workers', type=int, default=16)
     
@@ -361,6 +388,36 @@ def visualize_predictions(image, gt2D, logits_pred, click, step, save_path=None)
     else:
         plt.show()
 
+def plot_image_with_mask_and_clicks(image, mask, click, save_path):
+    h, w = image.shape[1], image.shape[2]
+    plt.figure(figsize=(w / 100, h / 100), dpi=100)
+    plt.imshow(image.permute(1, 2, 0).cpu().numpy())
+    color_mask = [(0, 0, 0), colors[int(click[1][0])]]
+    cm = ListedColormap(color_mask)
+    plt.imshow(mask, cmap=cm, alpha=0.5)
+    plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
+    plt.axis('off')
+    plt.savefig(save_path)
+    plt.close()
+
+def plot_clicks(coords, labels):
+    for click_idx in range(coords.shape[0]):
+        coord = coords[click_idx]
+        label = labels[click_idx]
+        plt.scatter(coord[1], coord[0], color='red', marker='x')
+
+def visualize_gt(image, gt2D, click, step, save_path=None):
+    gt_mask = gt2D.squeeze().cpu().numpy()
+    file_path = f"{save_path}/step_{step}_gt.png" if save_path else f"step_{step}_gt.png"
+    plot_image_with_mask_and_clicks(image, gt_mask, click, file_path)
+
+def visualize_pred(image, logits_pred, click, step, save_path=None):
+    pred_mask = logits_pred[0].squeeze().detach().cpu().numpy()
+    pred_mask_bin = (pred_mask > 0.5).astype(np.uint8)
+    file_path = f"{save_path}/step_{step}_pred.png" if save_path else f"step_{step}_pred.png"
+    plot_image_with_mask_and_clicks(image, pred_mask_bin, click, file_path)
+
+
 # %%
 class MedSAM_Lite(nn.Module):
     def __init__(self, 
@@ -660,10 +717,17 @@ def main_worker(local_rank, ngpus_per_node, args):
     train_losses = []
     val_losses = []
     epoch_times = []
+    vis_dir = os.path.join(model_save_path, 'visualization')
+    vis_train_dir = os.path.join(vis_dir, 'train')
+    vis_val_dir = os.path.join(vis_dir, 'validation')
+    os.makedirs(vis_train_dir, exist_ok=True)
+    os.makedirs(vis_val_dir, exist_ok=True)
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = [1e10 for _ in range(len(train_loader))]
         epoch_loss_val = [1e10 for _ in range(len(val_loader))]
         epoch_start_time = time()
+        vis_train_epoch_dir = os.path.join(vis_train_dir, str(epoch))
+        os.makedirs(vis_train_epoch_dir, exist_ok=True)
         if is_main_host:
             pbar = tqdm(train_loader)
         else:
@@ -698,7 +762,11 @@ def main_worker(local_rank, ngpus_per_node, args):
                     del logits_pred0
                 medsam_lite_model.train()
                 logits_pred, iou_pred = medsam_lite_model(image, None, click, logits_pred1)
-                visualize_predictions(image[0], gt2D[0], logits_pred, click, epoch, save_path=f'visualization_epoch_{epoch}.png')
+                # visualize_predictions(image[0], gt2D[0], logits_pred, click, epoch, save_path=f'visualization_epoch_{epoch}.png')
+                if is_main_host:
+                    visualize_gt(image[0], gt2D[0], click, step, save_path=vis_train_epoch_dir)
+                    visualize_pred(image[0], logits_pred, click, step, save_path=vis_train_epoch_dir)
+                
                 del logits_pred1
             elif args.prompt_mode == "bbox":
                 logits_pred, iou_pred = medsam_lite_model(image, boxes, None, None)
