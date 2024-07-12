@@ -59,7 +59,7 @@ colors = [(r/255, g/255, b/255) for r, g, b in colors]
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--tr_npy_path', type=str,
-                        default='data/npy/CT_Abd',
+                        default='data/npy',
                         help='Path to training npy files; two subfolders: gts and imgs')
     parser.add_argument('-v', '--val_npy_path', type=str,
                         default='data/npy/CT_Abd',
@@ -72,8 +72,8 @@ def get_args():
                         help='use data augmentation during training')
     # train
     parser.add_argument('-num_epochs', type=int, default=150)
-    parser.add_argument('-batch_size', type=int, default=2)
-    parser.add_argument('-which_gpus', type=list, default=[1],
+    parser.add_argument('-batch_size', type=int, default=4)
+    parser.add_argument('-which_gpus', type=list, default=[3,4,5,6],
                         help='Which GPUs will be used')
     parser.add_argument('-num_workers', type=int, default=16)
     
@@ -113,7 +113,7 @@ def get_args():
                         help="the place to save your runs. can be your wandb username or team name")
     parser.add_argument("-wandb_project", type=str, default="wan_test",
                         help="Name of WandB project")
-    parser.add_argument("-wandb_name", type=str, default="debug",
+    parser.add_argument("-wandb_name", type=str, default="click_mask_ckpt100",
                         help="wandb run name")
     parser.add_argument("-wandb_api_key", type=str, default="3fbca40760ef6b876bd8b91911d1008dad6a7b09",
                         help="wandb api key")
@@ -545,9 +545,9 @@ def main_worker(local_rank, ngpus_per_node, args):
     world_size = len(args.which_gpus)
     print(f"[Rank {rank}]: Use GPU: {args.which_gpus[local_rank]} for training")
     is_main_host = rank == 0
+    run_id = datetime.now().strftime("%Y%m%d-%H%M")
+    model_save_path = join(args.work_dir, args.wandb_name + "-" + run_id)
     if is_main_host:
-        run_id = datetime.now().strftime("%Y%m%d-%H%M")
-        model_save_path = join(args.work_dir, args.wandb_name + "-" + run_id)
         makedirs(model_save_path, exist_ok=True)
         copyfile(
             __file__, join(model_save_path, run_id + "_" + os.path.basename(__file__))
@@ -696,20 +696,23 @@ def main_worker(local_rank, ngpus_per_node, args):
     if os.path.exists(args.resume):
         # ckpt_folders = sorted(listdir(args.resume))
         # ckpt_folders = [f for f in ckpt_folders if (f.startswith(args.task_name) and isfile(join(args.resume, f, 'medsam_lite_latest.pth')))]
-        print('*'*20)
+        if is_main_host:
+            print('*'*20)
         # print('existing ckpts in', args.resume, ckpt_folders)
         # find the latest ckpt folders
         # time_strings = [f.split(args.task_name + '-')[-1] for f in ckpt_folders]
         # dates = [datetime.strptime(f, '%Y%m%d-%H%M') for f in time_strings]
         # latest_date = max(dates)
         latest_ckpt = args.resume
-        print('Loading from', latest_ckpt)
+        if is_main_host:
+            print('Loading from', latest_ckpt)
         checkpoint = torch.load(latest_ckpt, map_location=device)
         medsam_lite_model.module.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_epoch = checkpoint["epoch"] + 1
         best_loss = checkpoint["loss"]
-        print(f"Loaded checkpoint from epoch {start_epoch}")
+        if is_main_host:
+            print(f"Loaded checkpoint from epoch {start_epoch}")
     else:
         start_epoch = 0
         best_loss = 1e10
@@ -815,7 +818,7 @@ def main_worker(local_rank, ngpus_per_node, args):
                         logits_pred0, _ = medsam_lite_model(image, None, click, None)
                         logits_pred1, _ = medsam_lite_model(image, None, click, logits_pred0)
                         logits_pred, iou_pred = medsam_lite_model(image, None, click, logits_pred1)
-                        if is_main_host and step % 5 == 0:
+                        if is_main_host:
                             visualize_gt(image[0], gt2D[0], click, step, save_path=vis_val_epoch_dir)
                             visualize_pred(image[0], logits_pred0, click, step, 1, save_path=vis_val_epoch_dir)
                             visualize_pred(image[0], logits_pred1, click, step, 2, save_path=vis_val_epoch_dir)
