@@ -411,10 +411,10 @@ def visualize_gt(image, gt2D, click, step, save_path=None):
     file_path = f"{save_path}/step_{step}_gt.png" if save_path else f"step_{step}_gt.png"
     plot_image_with_mask_and_clicks(image, gt_mask, click, file_path)
 
-def visualize_pred(image, logits_pred, click, step, save_path=None):
+def visualize_pred(image, logits_pred, click, step, layer, save_path=None):
     pred_mask = logits_pred[0].squeeze().detach().cpu().numpy()
     pred_mask_bin = (pred_mask > 0.5).astype(np.uint8)
-    file_path = f"{save_path}/step_{step}_pred.png" if save_path else f"step_{step}_pred.png"
+    file_path = f"{save_path}/step_{step}_layer_{layer}_pred.png" if save_path else f"step_{step}_pred.png"
     plot_image_with_mask_and_clicks(image, pred_mask_bin, click, file_path)
 
 
@@ -727,7 +727,9 @@ def main_worker(local_rank, ngpus_per_node, args):
         epoch_loss_val = [1e10 for _ in range(len(val_loader))]
         epoch_start_time = time()
         vis_train_epoch_dir = os.path.join(vis_train_dir, str(epoch))
+        vis_val_epoch_dir = os.path.join(vis_val_dir, str(epoch))
         os.makedirs(vis_train_epoch_dir, exist_ok=True)
+        os.makedirs(vis_val_epoch_dir, exist_ok=True)
         if is_main_host:
             pbar = tqdm(train_loader)
         else:
@@ -759,15 +761,15 @@ def main_worker(local_rank, ngpus_per_node, args):
                 with torch.no_grad():
                     logits_pred0, _ = medsam_lite_model(image, None, click, None)
                     logits_pred1, _ = medsam_lite_model(image, None, click, logits_pred0)
-                    del logits_pred0
                 medsam_lite_model.train()
                 logits_pred, iou_pred = medsam_lite_model(image, None, click, logits_pred1)
                 # visualize_predictions(image[0], gt2D[0], logits_pred, click, epoch, save_path=f'visualization_epoch_{epoch}.png')
-                if is_main_host:
+                if is_main_host and step % 5 == 0:
                     visualize_gt(image[0], gt2D[0], click, step, save_path=vis_train_epoch_dir)
-                    visualize_pred(image[0], logits_pred, click, step, save_path=vis_train_epoch_dir)
-                
-                del logits_pred1
+                    visualize_pred(image[0], logits_pred0, click, step, 1, save_path=vis_train_epoch_dir)
+                    visualize_pred(image[0], logits_pred1, click, step, 2, save_path=vis_train_epoch_dir)
+                    visualize_pred(image[0], logits_pred, click, step, 3, save_path=vis_train_epoch_dir)
+                del logits_pred0, logits_pred1
             elif args.prompt_mode == "bbox":
                 logits_pred, iou_pred = medsam_lite_model(image, boxes, None, None)
                 visualize_predictions(image[0], gt2D[0], logits_pred, click, epoch, save_path=f'visualization_epoch_{epoch}.png')
@@ -812,9 +814,13 @@ def main_worker(local_rank, ngpus_per_node, args):
                     elif args.prompt_mode == "click_mask":  
                         logits_pred0, _ = medsam_lite_model(image, None, click, None)
                         logits_pred1, _ = medsam_lite_model(image, None, click, logits_pred0)
-                        del logits_pred0
                         logits_pred, iou_pred = medsam_lite_model(image, None, click, logits_pred1)
-                        del logits_pred1
+                        if is_main_host and step % 5 == 0:
+                            visualize_gt(image[0], gt2D[0], click, step, save_path=vis_val_epoch_dir)
+                            visualize_pred(image[0], logits_pred0, click, step, 1, save_path=vis_val_epoch_dir)
+                            visualize_pred(image[0], logits_pred1, click, step, 2, save_path=vis_val_epoch_dir)
+                            visualize_pred(image[0], logits_pred, click, step, 3,  save_path=vis_val_epoch_dir)
+                        del logits_pred0, logits_pred1
                     elif args.prompt_mode == "bbox":
                         logits_pred, iou_pred = medsam_lite_model(image, boxes, None, None)
                     else:
