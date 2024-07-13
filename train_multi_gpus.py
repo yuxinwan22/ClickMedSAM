@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument('--data_aug', action='store_true', default=True,
                         help='use data augmentation during training')
     # train
-    parser.add_argument('-num_epochs', type=int, default=150)
+    parser.add_argument('-num_epochs', type=int, default=100)
     parser.add_argument('-batch_size', type=int, default=4)
     parser.add_argument('-which_gpus', type=list, default=[3,4,5,6],
                         help='Which GPUs will be used')
@@ -102,8 +102,8 @@ def get_args():
                         help='Node rank, if training on a single machine, set to 0')
     parser.add_argument('-bucket_cap_mb', type = int, default = 25,
                         help='The amount of memory in Mb that DDP will accumulate before firing off gradient communication for the bucket (need to tune)')
-    parser.add_argument('-resume', type = str, default = 'work_dir/click_mask_pre_epoch100-20240708-1052/medsam_lite_best.pth', required=False,
-                        help="Resuming training from a work_dir")
+    parser.add_argument('-resume', type = str, default = '', required=False,
+                        help="Resuming training from a work_dir, work_dir/click_mask_pre_epoch100-20240708-1052/medsam_lite_best.pth")
     parser.add_argument('-init_method', type = str, default = "env://")
     
     ## wandb
@@ -111,9 +111,9 @@ def get_args():
                         help="")
     parser.add_argument("-wandb_entity", type=str, default="CVHCI_p24gF_ClickMedSAM",
                         help="the place to save your runs. can be your wandb username or team name")
-    parser.add_argument("-wandb_project", type=str, default="wan_test",
+    parser.add_argument("-wandb_project", type=str, default="finetune",
                         help="Name of WandB project")
-    parser.add_argument("-wandb_name", type=str, default="click_mask_ckpt100",
+    parser.add_argument("-wandb_name", type=str, default="click_mask_multi_pre",
                         help="wandb run name")
     parser.add_argument("-wandb_api_key", type=str, default="3fbca40760ef6b876bd8b91911d1008dad6a7b09",
                         help="wandb api key")
@@ -121,6 +121,8 @@ def get_args():
     ## interfaces
     parser.add_argument("-prompt_mode", type=str, default="click_mask",
                         help="bbox, click_re, click_mask")
+    parser.add_argument("-click_mode", type=str, default="multi",
+                        help="single or multi")
     parser.add_argument("-num_clicks", type=int, default="10",
                         help="number of candidate clicks, only valuable when prompt mode is click_re!")
     parser.add_argument("-num_reselect", type=int, default="3",
@@ -258,13 +260,13 @@ class NpyDataset(Dataset):
         y_max = min(H, y_max + random.randint(0, self.bbox_shift))
         bboxes = np.array([x_min, y_min, x_max, y_max])
         return {
-            "image": torch.tensor(img_padded).float(),
-            "gt2D": torch.tensor(gt2D[None, :,:]).long(),
+            "image": torch.tensor(img_padded).float(), # torch.Size([3, 256, 256])
+            "gt2D": torch.tensor(gt2D[None, :,:]).long(), # torch.Size([1, 256, 256])
             "bboxes": torch.tensor(bboxes[None, None, ...]).float(), # (B, 1, 4)
             "image_name": img_name,
             "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
             "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long(),
-            "clicks": (clicks_coords, click_labels)
+            "clicks": (clicks_coords, click_labels) # torch.Size([num_clicks, 2]), torch.Size([num_clicks])
         }
 
     def resize_longest_side(self, image):
@@ -349,50 +351,53 @@ def sanity_check_dataset(args):
         plt.close()
         break
 
-def visualize_predictions(image, gt2D, logits_pred, click, step, save_path=None):
-    plt.figure(figsize=(10, 5))
+# def visualize_predictions(image, gt2D, logits_pred, click, step, save_path=None):
+#     plt.figure(figsize=(10, 5))
 
-    # 绘制点击点的辅助函数
-    def plot_clicks(coords, labels):
-        for click_idx in range(coords.shape[0]):
-            coord = coords[click_idx]
-            label = labels[click_idx]
-            plt.scatter(coord[1], coord[0], color='blue' if label == 1 else 'blue', marker='x')
+#     # 绘制点击点的辅助函数
+#     def plot_clicks(coords, labels):
+#         for click_idx in range(coords.shape[0]):
+#             coord = coords[click_idx]
+#             label = labels[click_idx]
+#             plt.scatter(coord[1], coord[0], color='blue' if label == 1 else 'blue', marker='x')
 
-    # 图像带真实掩码和点击点
-    plt.subplot(1, 2, 1)
-    plt.imshow(image.permute(1, 2, 0).cpu().numpy())
-    # 绘制真实掩码
-    plt.imshow(gt2D.squeeze().cpu().numpy(), cmap='viridis', alpha=0.5)  # 叠加真实掩码
-    # 绘制点击点
-    plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
-    plt.title('Image with Ground Truth Mask and Clicks')
-    plt.axis('off')
+#     # 图像带真实掩码和点击点
+#     plt.subplot(1, 2, 1)
+#     plt.imshow(image.permute(1, 2, 0).cpu().numpy())
+#     # 绘制真实掩码
+#     plt.imshow(gt2D.squeeze().cpu().numpy(), cmap='viridis', alpha=0.5)  # 叠加真实掩码
+#     # 绘制点击点
+#     plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
+#     plt.title('Image with Ground Truth Mask and Clicks')
+#     plt.axis('off')
 
-    # 图像带预测掩码和点击点
-    plt.subplot(1, 2, 2)
-    plt.imshow(image.permute(1, 2, 0).cpu().numpy())
-    # 绘制预测掩码
-    pred_mask = logits_pred[0].squeeze().detach().cpu().numpy()
-    pred_mask_bin = (pred_mask > 0.5).astype(np.uint8)
-    plt.imshow(pred_mask_bin, cmap='viridis', alpha=0.5)  # 叠加预测掩码
-    # 绘制点击点
-    plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
-    plt.title('Image with Prediction Mask and Clicks')
-    plt.axis('off')
+#     # 图像带预测掩码和点击点
+#     plt.subplot(1, 2, 2)
+#     plt.imshow(image.permute(1, 2, 0).cpu().numpy())
+#     # 绘制预测掩码
+#     pred_mask = logits_pred[0].squeeze().detach().cpu().numpy()
+#     pred_mask_bin = (pred_mask > 0.5).astype(np.uint8)
+#     plt.imshow(pred_mask_bin, cmap='viridis', alpha=0.5)  # 叠加预测掩码
+#     # 绘制点击点
+#     plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
+#     plt.title('Image with Prediction Mask and Clicks')
+#     plt.axis('off')
 
-    plt.suptitle(f'Step {step}')
+#     plt.suptitle(f'Step {step}')
 
-    if save_path:
-        plt.savefig(save_path)
-    else:
-        plt.show()
+#     if save_path:
+#         plt.savefig(save_path)
+#     else:
+#         plt.show()
 
 def plot_image_with_mask_and_clicks(image, mask, click, save_path):
     h, w = image.shape[1], image.shape[2]
     plt.figure(figsize=(w / 100, h / 100), dpi=100)
     plt.imshow(image.permute(1, 2, 0).cpu().numpy())
-    color_mask = [(0, 0, 0), colors[int(click[1][0])]]
+    if click[1][0].shape[0] == 1:
+        color_mask = [(0, 0, 0), colors[int(click[1][0])]]
+    else:
+        color_mask = [(0, 0, 0), colors[int(click[1][0][0])]]
     cm = ListedColormap(color_mask)
     plt.imshow(mask, cmap=cm, alpha=0.5)
     plot_clicks(click[0][0].cpu().numpy(), click[1][0].cpu().numpy())
@@ -738,13 +743,18 @@ def main_worker(local_rank, ngpus_per_node, args):
         else:
             pbar = train_loader
         for step, batch in enumerate(pbar):
-            image = batch["image"]
-            gt2D = batch["gt2D"]
-            boxes = batch["bboxes"]
-            clicks = batch["clicks"]
+            image = batch["image"] # torch.Size([B, 3, 256, 256])
+            gt2D = batch["gt2D"] # torch.Size([B, 1, 256, 256])
+            boxes = batch["bboxes"] # torch.Size([B, 1, 1, 4])
+            clicks = batch["clicks"] # coord range 0-255 (torch.Size([B, num_clicks_candidates, 2]), torch.Size([B, num_clicks_candidates]))
             clicks = (clicks[0].to(device), clicks[1].to(device))
             random_index = torch.randint(0, clicks[0].size(1), (1,))
-            click = (clicks[0][:, random_index, :], clicks[1][:, random_index])
+            if args.click_mode == "single":
+                click = (clicks[0][:, random_index, :], clicks[1][:, random_index]) # torch.Size([B, 1, 2]), torch.Size([B, 1])
+            elif args.click_mode == "multi":
+                click = (clicks[0][:, :random_index+1, :], clicks[1][:, :random_index+1])
+            else:
+                raise ValueError("Invalid click mode! Please enter single or multi")
             optimizer.zero_grad()
             image, gt2D, click, boxes = image.to(device), gt2D.to(device), (click[0].to(device), click[1].to(device)), boxes.to(device)
             
@@ -765,7 +775,7 @@ def main_worker(local_rank, ngpus_per_node, args):
                     logits_pred0, _ = medsam_lite_model(image, None, click, None)
                     logits_pred1, _ = medsam_lite_model(image, None, click, logits_pred0)
                 medsam_lite_model.train()
-                logits_pred, iou_pred = medsam_lite_model(image, None, click, logits_pred1)
+                logits_pred, iou_pred = medsam_lite_model(image, None, click, logits_pred1) # torch.Size([B, 1, 256, 256]), torch.Size([B, 1])
                 # visualize_predictions(image[0], gt2D[0], logits_pred, click, epoch, save_path=f'visualization_epoch_{epoch}.png')
                 if is_main_host and step % 5 == 0:
                     visualize_gt(image[0], gt2D[0], click, step, save_path=vis_train_epoch_dir)
@@ -775,7 +785,7 @@ def main_worker(local_rank, ngpus_per_node, args):
                 del logits_pred0, logits_pred1
             elif args.prompt_mode == "bbox":
                 logits_pred, iou_pred = medsam_lite_model(image, boxes, None, None)
-                visualize_predictions(image[0], gt2D[0], logits_pred, click, epoch, save_path=f'visualization_epoch_{epoch}.png')
+                # visualize_predictions(image[0], gt2D[0], logits_pred, click, epoch, save_path=f'visualization_epoch_{epoch}.png')
             else:
                 raise ValueError("Invalid prompt mode! Please enter click_mask or click_re or bbox")
 
@@ -799,7 +809,12 @@ def main_worker(local_rank, ngpus_per_node, args):
                     clicks = batch["clicks"]
                     clicks = (clicks[0].to(device), clicks[1].to(device))
                     random_index = torch.randint(0, clicks[0].size(1), (1,))
-                    click = (clicks[0][:, random_index, :], clicks[1][:, random_index])
+                    if args.click_mode == "single":
+                        click = (clicks[0][:, random_index, :], clicks[1][:, random_index]) # torch.Size([B, 1, 2]), torch.Size([B, 1])
+                    elif args.click_mode == "multi":
+                        click = (clicks[0][:, :random_index+1, :], clicks[1][:, :random_index+1])
+                    else:
+                        raise ValueError("Invalid click mode! Please enter single or multi")
                     optimizer.zero_grad()
                     image, gt2D, click, boxes = image.to(device), gt2D.to(device), (click[0].to(device), click[1].to(device)), boxes.to(device)
                     
