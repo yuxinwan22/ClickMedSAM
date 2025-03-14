@@ -1,9 +1,6 @@
-# LiteMedSAM
+# ClickMedSAM
 
-A lightweight version of MedSAM for fast training and inference. The model was trained with the following two states:
-
-- Stage 1. Distill a lightweight image encoder `TinyViT` from the MedSAM image encoder `ViT` by imposing the image embedding outputs to be the same
-- State 2. Replace the MedSAM image encoder `ViT` with `TinyViT` and fine-tune the whole pipeline
+:warning: **Note:** This repository contains a **development version** of the project. The final release version is not public yet.
 
 
 ## Installation
